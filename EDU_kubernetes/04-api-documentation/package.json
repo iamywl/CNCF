@@ -1,0 +1,14 @@
+{
+  "name": "edu-api-documentation",
+  "version": "1.0.0",
+  "description": "Swagger/OpenAPI POC - API 문서화 자동 생성",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.0"
+  }
+}

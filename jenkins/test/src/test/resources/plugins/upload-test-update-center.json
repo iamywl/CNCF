@@ -1,0 +1,29 @@
+updateCenter.post(
+{"connectionCheckUrl":"http://www.google.com/", 
+    "core": {
+        "buildDate": "Dec 31, 1969",
+        "name": "core",
+        "url": "jenkins.war",
+        "version": "23"
+    },
+    "id": "default",
+    "plugins": {
+        "dependee": {
+            "buildDate": "Dec 17, 2008",
+            "dependencies": [],
+            "developers": [],
+            "excerpt": "…",
+            "gav": "org.jenkins-ci.plugins.dependencytest:dependee:0.0.2",
+            "labels": [],
+            "name": "dependee",
+            "requiredCore": "1.466",
+            "sha1": "2Axh5MnAFTnHml0V0ksrpYhMK1E=",
+            "sha256": "7XhzuS+CtvCQpG35Qj0gC1p0dlOg+kXXJpvWi7QGDKE=",
+            "title": "dependee",
+            "url": "dependee-0.0.2.hpi",
+            "version": "0.0.2"
+        }
+    },
+    "updateCenterVersion": 1
+}
+);

@@ -1,0 +1,124 @@
+<!--
+The MIT License
+
+Copyright (c) 2023, CloudBees Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+-->
+
+<!--
+  Entrance to the configuration page
+-->
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:l="/lib/layout" xmlns:f="/lib/form" xmlns:t="/lib/hudson">
+  <j:new var="managementLink" className="jenkins.agents.CloudsLink" />
+
+  <j:set var="header">
+    <l:view>
+      <l:app-bar title="${managementLink.displayName}">
+        <j:if test="${it.cloudAvailable and it.hasClouds()}">
+          <l:isAdmin>
+            <a class="jenkins-button jenkins-button--primary" href="new">
+              <l:icon src="symbol-add"/>
+              ${%newCloud}
+            </a>
+          </l:isAdmin>
+        </j:if>
+        <t:help href="https://www.jenkins.io/redirect/distributed-builds" />
+      </l:app-bar>
+      <p class="jenkins-page-description">
+        <j:choose>
+          <j:when test="${it.cloudAvailable and it.hasClouds()}">
+            ${%description}
+          </j:when>
+          <j:otherwise>
+            ${managementLink.description}
+          </j:otherwise>
+        </j:choose>
+      </p>
+    </l:view>
+  </j:set>
+
+  <l:settings-subpage header="${header}" noDefer="true">
+    <j:set var="readOnlyMode" value="${!app.hasPermission(app.ADMINISTER)}"/>
+    <j:choose>
+      <j:when test="${it.cloudAvailable and it.hasClouds()}">
+        <l:isAdmin>
+          <script src="${resURL}/jsbundles/pages/cloud-set.js" type="text/javascript" />
+          <link rel="stylesheet" href="${resURL}/jsbundles/pages/cloud-set.css" type="text/css" />
+        </l:isAdmin>
+
+        <f:form method="post" name="config" action="reorder">
+          <div class="with-drag-drop jenkins-!-margin-bottom-5">
+            <j:forEach var="cloud" items="${it.clouds}">
+              <div class="repeated-chunk" id="cloud_${cloud.name}">
+                <div class="app-cloud-item">
+                  <div class="dd-handle" />
+                  <l:icon src="${cloud.iconClassName}" tooltip="${cloud.iconAltText}" />
+                  <div>
+                    <input type="hidden" name="name" value="${cloud.name}" />
+                    <a href="${it.getCloudUrl(request2,app,cloud)}">
+                      ${cloud.name}
+                    </a>
+                  </div>
+                  <div class="app-cloud-item__actions ignore-dirty-panel">
+                    <a href="${it.getCloudUrl(request2,app,cloud)}configure"
+                       class="jenkins-button jenkins-button--tertiary">
+                      <l:icon src="symbol-settings" />
+                    </a>
+                    <button type="button"
+                            data-href="${it.getCloudUrl(request2,app,cloud)}"
+                            class="jenkins-button jenkins-button--tertiary jenkins-jumplist-link">
+                      <l:icon src="symbol-menu" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </j:forEach>
+          </div>
+
+          <l:isAdmin>
+            <f:bottomButtonBar hidden="true">
+              <f:apply value="${%Save}" clazz="jenkins-button--primary" />
+            </f:bottomButtonBar>
+          </l:isAdmin>
+        </f:form>
+        <st:adjunct includes="lib.form.confirm" />
+      </j:when>
+      <j:otherwise>
+        <j:choose>
+          <j:when test="${it.cloudAvailable}">
+            <l:notice title="${%noCloudAvailable}" icon="symbol-cloud">
+              <a href="new">
+                ${%newCloud}
+              </a>
+            </l:notice>
+          </j:when>
+          <j:otherwise>
+            <l:notice title="${%noCloudPlugin}" icon="symbol-cloud">
+              <a href="${rootURL}/manage/pluginManager/available?filter=${it.cloudUpdateCenterCategoryLabel}">
+                ${%installCloudPlugin}
+              </a>
+            </l:notice>
+          </j:otherwise>
+        </j:choose>
+      </j:otherwise>
+    </j:choose>
+  </l:settings-subpage>
+</j:jelly>

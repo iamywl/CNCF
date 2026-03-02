@@ -1,0 +1,24 @@
+# Xcode's user settings
+xcuserdata/
+tart.xcodeproj/
+
+# SwiftPM
+.swiftpm/
+
+# AppCode
+.idea/
+
+# VS Code
+.vscode/
+
+# Swift
+.build/
+
+# GoReleaser
+dist/
+
+# mkdocs
+.cache
+
+# mkdocs-material
+site

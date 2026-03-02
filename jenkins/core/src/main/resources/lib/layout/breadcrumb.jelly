@@ -1,0 +1,93 @@
+<!--
+The MIT License
+
+Copyright (c) 2012- CloudBees, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+-->
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:l="/lib/layout">
+  <st:documentation> <![CDATA[
+    Used inside <l:layout> to render additional breadcrumb items.
+    ]]>
+    <st:attribute name="title" use="required">
+      Display name of the breadcrumb.
+    </st:attribute>
+    <st:attribute name="href">
+      URL that the breadcrumb item links to. Can be omitted.
+    </st:attribute>
+    <st:attribute name="id">
+      If specified, this ID will be assigned to the LI element.
+      This is useful for programmatically adding the context menu
+    </st:attribute>
+    <st:attribute name="hasMenu">
+      If true, this breadcrumb item will display a dropdown menu with items
+      from the '{breadcrumb.href}/contextMenu' path on hover. Since 2.361.
+    </st:attribute>
+    <st:attribute name="hasChildrenMenu">
+      If true, this breadcrumb item will display a dropdown menu with items
+      from the '{breadcrumb.href}/childrenContextMenu' path on hover. Since TODO.
+    </st:attribute>
+  </st:documentation>
+
+  <j:if test="${mode=='breadcrumbs'}">
+    <j:set var="baseUrl" value="${request2.originalRequestURI}" />
+    <j:set var="hasLink" value="${attrs.href != null}" />
+    <j:set var="isCurrent" value="${baseUrl == attrs.href}" />
+    <j:set var="inPageNav" value="${attrs.id.contains('inpage-nav')}" />
+    <j:set var="shouldShowTitle" value="${attrs.title.length() > 26}" />
+
+    <li aria-current="${(isCurrent or !hasLink)? 'page' : null}"
+        id="${attrs.id}" class="jenkins-breadcrumbs__list-item"
+        data-type="breadcrumb-item" data-has-menu="${attrs.hasMenu}"
+    >
+      <j:choose>
+        <j:when test="${(!hasLink and !attrs.hasMenu)  or (isCurrent and !inPageNav)}">
+          <j:choose>
+            <j:when test="${shouldShowTitle}">
+              <span tooltip="${attrs.title}">${attrs.title}</span>
+            </j:when>
+            <j:otherwise>
+              <span>${attrs.title}</span>
+            </j:otherwise>
+          </j:choose>
+        </j:when>
+        <j:otherwise>
+          <j:choose>
+            <j:when test="${shouldShowTitle}">
+              <a tooltip="${attrs.title}" href="${attrs.href}">
+                ${attrs.title}
+              </a>
+            </j:when>
+            <j:otherwise>
+              <a href="${attrs.href}">
+                ${attrs.title}
+              </a>
+            </j:otherwise>
+          </j:choose>
+          <j:if test="${attrs.hasMenu or attrs.hasChildrenMenu}">
+            <div aria-label="dropdown menu for ${attrs.title}" data-iscurrent="${isCurrent}" data-href="${attrs.href}" data-base="${baseUrl}" tabindex="0" class="dropdown-indicator" data-model="${attrs.hasMenu}" data-children="${attrs.hasChildrenMenu}" >
+              <l:icon class="icon-sm jenkins-!-text-color-secondary" src="symbol-chevron-down" />
+            </div>
+          </j:if>
+        </j:otherwise>
+      </j:choose>
+    </li>
+  </j:if>
+</j:jelly>

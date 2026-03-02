@@ -1,0 +1,70 @@
+version: 2
+
+project_name: tart
+
+before:
+  hooks:
+    - .ci/set-version.sh
+    - swift build --arch arm64 --configuration release --product tart
+    - swift build --arch x86_64 --configuration release --product tart
+
+builds:
+  - id: tart
+    builder: prebuilt
+    goamd64: [v1]
+    goos:
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    binary: tart.app/Contents/MacOS/tart
+    prebuilt:
+      path: '.build/{{- if eq .Arch "arm64" }}arm64{{- else }}x86_64{{ end }}-apple-macosx/release/tart'
+
+universal_binaries:
+  - name_template: tart.app/Contents/MacOS/tart
+    replace: true
+    hooks:
+      post: gon gon.hcl
+
+archives:
+  - name_template: "{{ .ProjectName }}"
+    files:
+      - src: Resources/embedded.provisionprofile
+        dst: tart.app/Contents
+        strip_parent: true
+      - src: Resources/Info.plist
+        dst: tart.app/Contents
+        strip_parent: true
+      - src: Resources/AppIcon.png
+        dst: tart.app/Contents/Resources
+        strip_parent: true
+      - LICENSE
+
+release:
+  prerelease: auto
+
+brews:
+  - name: tart
+    repository:
+      owner: cirruslabs
+      name: homebrew-cli
+    caveats: |
+      Tart has been installed. You might want to reduce the default DHCP lease time
+      from 86,400 to 600 seconds to avoid DHCP shortage when running lots of VMs daily:
+
+        sudo defaults write /Library/Preferences/SystemConfiguration/com.apple.InternetSharing.default.plist bootpd -dict DHCPLeaseTimeSecs -int 600
+
+      See https://tart.run/faq/#changing-the-default-dhcp-lease-time for more details.
+    homepage: https://github.com/cirruslabs/tart
+    license: "Fair Source"
+    description: Run macOS and Linux VMs on Apple Hardware
+    skip_upload: auto
+    dependencies:
+      - "cirruslabs/cli/softnet"
+    install: |
+      libexec.install Dir["*"]
+      bin.write_exec_script "#{libexec}/tart.app/Contents/MacOS/tart"
+      generate_completions_from_executable(libexec/"tart.app/Contents/MacOS/tart", "--generate-completion-script")
+    custom_block: |
+      depends_on :macos => :ventura

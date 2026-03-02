@@ -1,0 +1,12 @@
+{
+  "name": "edu-postman",
+  "version": "1.0.0",
+  "description": "Postman Collection + Newman CLI POC",
+  "scripts": {
+    "test": "newman run collections/ecommerce-api.json -e collections/dev-environment.json --reporters cli",
+    "test:html": "newman run collections/ecommerce-api.json -e collections/dev-environment.json --reporters cli,htmlextra"
+  },
+  "devDependencies": {
+    "newman": "^6.1.1"
+  }
+}

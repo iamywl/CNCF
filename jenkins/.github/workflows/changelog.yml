@@ -1,0 +1,72 @@
+# Automates creation of changelog drafts using Release Drafter
+# More Info: https://github.com/jenkinsci/.github/blob/master/.github/release-drafter.adoc
+name: Changelog Drafter
+
+on:
+  workflow_dispatch:
+  push:
+    # branches to consider in the event; optional, defaults to all
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  update_draft_release:
+    permissions:
+      pull-requests: write # to add label to PR (release-drafter/release-drafter)
+      contents: write # to create a github release (release-drafter/release-drafter)
+
+    if: ${{ github.repository_owner == 'jenkinsci' }}
+    runs-on: ubuntu-latest
+    steps:
+      # Drafts your next Release notes as Pull Requests are merged into "master"
+      - name: Generate GitHub Release Draft
+        id: release-drafter
+        uses: release-drafter/release-drafter@6db134d15f3909ccc9eefd369f02bd1e9cffdf97 # v6.2.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Generates a YAML changelog file using https://github.com/jenkinsci/jenkins-core-changelog-generator
+      # used by Oleg N in open graph generator experiment for now
+      - name: Generate YAML changelog draft
+        id: jenkins-core-changelog-generator
+        uses: jenkinsci/core-changelog-generator@feb124ed2262f8586ac4561348436afb965812e1 # v2.2.2
+        env:
+          GITHUB_AUTH: github-actions:${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Changelog YAML
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: changelog.yaml
+          path: changelog.yaml
+
+  jenkins_io_draft:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'jenkinsci'
+    steps:
+      - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        id: generate-token
+        with:
+          app-id: ${{ secrets.JENKINS_CHANGELOG_UPDATER_APP_ID }}
+          private-key: ${{ secrets.JENKINS_CHANGELOG_UPDATER_PRIVATE_KEY }}
+          owner: jenkins-infra
+          repositories: jenkins.io
+      - name: Check out
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Publish jenkins.io changelog draft
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GITHUB_AUTH: "nobody:${{ steps.generate-token.outputs.token }}"
+          GIT_AUTHOR_NAME: jenkins-infra-changelog-generator
+          GIT_AUTHOR_EMAIL: <86592549+jenkins-infra-changelog-generator[bot]@users.noreply.github.com>
+          GIT_COMMITTER_NAME: jenkins-infra-changelog-generator
+          GIT_COMMITTER_EMAIL: <86592549+jenkins-infra-changelog-generator[bot]@users.noreply.github.com>
+        run: |
+          wget --quiet https://raw.githubusercontent.com/jenkinsci/core-changelog-generator/master/generate-weekly-changelog.sh
+          # Create a Python virtual environment for pip install
+          # See https://github.com/jenkinsci/core-changelog-generator/issues/37
+          python3 -m venv venv
+          source venv/bin/activate
+          bash generate-weekly-changelog.sh

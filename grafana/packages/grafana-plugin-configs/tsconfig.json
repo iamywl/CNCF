@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "alwaysStrict": true,
+    "customConditions": ["@grafana-app/source"],
+    "declaration": false,
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "resolveJsonModule": true
+  },
+  "extends": "@grafana/tsconfig",
+  "exclude": ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"],
+  "include": ["./types", "."]
+}

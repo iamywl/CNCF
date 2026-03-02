@@ -1,0 +1,44 @@
+<!--
+The MIT License
+
+Copyright (c) 2004-2009, Sun Microsystems, Inc., Kohsuke Kawaguchi, Simon Wiest
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+-->
+
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:dd="/lib/layout/dropdowns" xmlns:st="jelly:stapler" xmlns:l="/lib/layout">
+  <div id="rss-bar" class="jenkins-buttons-row jenkins-buttons-row--invert">
+    <l:overflowButton clazz="jenkins-button--tertiary">
+      <dd:item icon="symbol-information-circle" id="button-icon-legend" text="${%Legend}" />
+      <dd:separator />
+      <dd:submenu icon="symbol-rss" text="${%Atom feed}">
+        <dd:item icon="symbol-rss" text="${%All}" href="rssAll" />
+        <dd:item icon="symbol-rss" text="${%Failures}" href="rssFailed" />
+        <dd:item icon="symbol-rss" text="${%LatestBuilds}" href="rssLatest" />
+      </dd:submenu>
+    </l:overflowButton>
+  </div>
+
+  <template id="template-icon-legend" data-title="${%Icon legend}">
+    <st:include page="_legend.jelly" it="${app}" />
+  </template>
+
+  <script src="${resURL}/jsbundles/pages/dashboard.js" type="text/javascript" defer="true" />
+</j:jelly>

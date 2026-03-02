@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>시스템 아키텍처 다이어그램 - POC</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        h1 { color: #333; border-bottom: 2px solid #4a90d9; padding-bottom: 10px; }
+        h2 { color: #4a90d9; margin-top: 40px; }
+        .diagram-container { background: white; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .description { background: #e8f4fd; border-left: 4px solid #4a90d9; padding: 15px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+        code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>시스템 아키텍처 다이어그램</h1>
+
+    <!-- ========== C4 Level 1: System Context ========== -->
+    <h2>1. C4 Level 1 — System Context Diagram</h2>
+    <div class="description">
+        <strong>목적:</strong> 시스템이 외부 세계와 어떤 관계를 맺는지 보여줍니다.<br>
+        <strong>청중:</strong> 경영진, 비개발 이해관계자, 신규 입사자
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+graph TB
+    User["👤 사용자<br/>(Web Browser)"]
+    Admin["👤 관리자<br/>(Admin Dashboard)"]
+    System["🖥️ E-Commerce System<br/>(우리가 만드는 시스템)"]
+    Payment["💳 결제 시스템<br/>(PG사 - 외부)"]
+    Email["📧 이메일 서비스<br/>(SendGrid - 외부)"]
+    Delivery["🚛 배송 시스템<br/>(CJ대한통운 API - 외부)"]
+
+    User -->|"상품 검색, 주문"| System
+    Admin -->|"상품/주문 관리"| System
+    System -->|"결제 요청"| Payment
+    System -->|"주문 확인 메일"| Email
+    System -->|"배송 요청"| Delivery
+
+    style System fill:#4a90d9,color:white,stroke:#2d6cb4
+    style Payment fill:#f5a623,color:white
+    style Email fill:#7ed321,color:white
+    style Delivery fill:#9013fe,color:white
+        </pre>
+    </div>
+
+    <!-- ========== C4 Level 2: Container ========== -->
+    <h2>2. C4 Level 2 — Container Diagram</h2>
+    <div class="description">
+        <strong>목적:</strong> 시스템 내부의 컨테이너(앱, DB, 큐 등)를 보여줍니다.<br>
+        <strong>청중:</strong> 개발팀, DevOps 엔지니어
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+graph TB
+    subgraph "E-Commerce System"
+        WebApp["🌐 Web Application<br/>(React, Next.js)<br/>Port: 3000"]
+        API["⚙️ API Server<br/>(Node.js, Express)<br/>Port: 8080"]
+        Worker["⏰ Background Worker<br/>(Bull Queue Consumer)"]
+        DB[("🗄️ PostgreSQL<br/>주문/상품/사용자 데이터")]
+        Cache[("⚡ Redis<br/>세션, 캐시, 큐")]
+        Storage["📁 Object Storage<br/>(S3 - 상품 이미지)"]
+    end
+
+    User["👤 사용자"] -->|"HTTPS"| WebApp
+    WebApp -->|"REST API<br/>JSON"| API
+    API -->|"SQL Query"| DB
+    API -->|"GET/SET"| Cache
+    API -->|"Enqueue Job"| Cache
+    Cache -->|"Dequeue Job"| Worker
+    Worker -->|"SQL Query"| DB
+    API -->|"Upload/Download"| Storage
+
+    style WebApp fill:#61dafb,color:black
+    style API fill:#68a063,color:white
+    style Worker fill:#f5a623,color:white
+    style DB fill:#336791,color:white
+    style Cache fill:#dc382d,color:white
+    style Storage fill:#ff9900,color:white
+        </pre>
+    </div>
+
+    <!-- ========== Microservice Architecture ========== -->
+    <h2>3. 마이크로서비스 아키텍처 예시</h2>
+    <div class="description">
+        <strong>목적:</strong> 대규모 시스템의 서비스 분리 전략을 보여줍니다.<br>
+        <strong>핵심:</strong> 각 서비스는 독립적 배포 가능, 자체 DB 소유 (Database per Service 패턴)
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+graph TB
+    Client["👤 Client"]
+    Gateway["🚪 API Gateway<br/>(Kong / Nginx)"]
+
+    subgraph "Service Mesh (Kubernetes)"
+        UserSvc["👤 User Service<br/>(Go)"]
+        ProductSvc["📦 Product Service<br/>(Node.js)"]
+        OrderSvc["🛒 Order Service<br/>(Java)"]
+        PaymentSvc["💳 Payment Service<br/>(Python)"]
+        NotifySvc["🔔 Notification Service<br/>(Node.js)"]
+    end
+
+    subgraph "Data Stores"
+        UserDB[("Users DB<br/>PostgreSQL")]
+        ProductDB[("Products DB<br/>MongoDB")]
+        OrderDB[("Orders DB<br/>PostgreSQL")]
+        MQ["📨 Message Queue<br/>(RabbitMQ)"]
+    end
+
+    Client -->|"HTTPS"| Gateway
+    Gateway -->|"/api/users"| UserSvc
+    Gateway -->|"/api/products"| ProductSvc
+    Gateway -->|"/api/orders"| OrderSvc
+
+    UserSvc --> UserDB
+    ProductSvc --> ProductDB
+    OrderSvc --> OrderDB
+
+    OrderSvc -->|"주문 생성 이벤트"| MQ
+    MQ -->|"결제 처리"| PaymentSvc
+    MQ -->|"알림 전송"| NotifySvc
+
+    style Gateway fill:#4a90d9,color:white
+    style MQ fill:#ff6600,color:white
+        </pre>
+    </div>
+
+    <!-- ========== Kubernetes Architecture ========== -->
+    <h2>4. Kubernetes 클러스터 아키텍처</h2>
+    <div class="description">
+        <strong>목적:</strong> 현재 프로젝트(Kubernetes) 관점의 인프라 아키텍처<br>
+        <strong>핵심:</strong> Control Plane과 Worker Node의 역할 분리
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+graph TB
+    User["👤 kubectl / API Client"]
+
+    subgraph "Control Plane"
+        APIServer["📡 kube-apiserver"]
+        Scheduler["📋 kube-scheduler"]
+        CM["⚙️ controller-manager"]
+        ETCD[("💾 etcd<br/>클러스터 상태 저장소")]
+    end
+
+    subgraph "Worker Node 1"
+        Kubelet1["🔧 kubelet"]
+        Proxy1["🔀 kube-proxy"]
+        Pod1A["🐳 Pod A"]
+        Pod1B["🐳 Pod B"]
+    end
+
+    subgraph "Worker Node 2"
+        Kubelet2["🔧 kubelet"]
+        Proxy2["🔀 kube-proxy"]
+        Pod2A["🐳 Pod C"]
+        Pod2B["🐳 Pod D"]
+    end
+
+    User -->|"HTTPS :6443"| APIServer
+    APIServer --> ETCD
+    APIServer --> Scheduler
+    APIServer --> CM
+    Scheduler -->|"Pod 스케줄링"| Kubelet1
+    Scheduler -->|"Pod 스케줄링"| Kubelet2
+    Kubelet1 --> Pod1A
+    Kubelet1 --> Pod1B
+    Kubelet2 --> Pod2A
+    Kubelet2 --> Pod2B
+
+    style APIServer fill:#326ce5,color:white
+    style ETCD fill:#419eda,color:white
+    style Scheduler fill:#326ce5,color:white
+    style CM fill:#326ce5,color:white
+        </pre>
+    </div>
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>

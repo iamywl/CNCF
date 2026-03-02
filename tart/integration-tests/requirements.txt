@@ -1,0 +1,6 @@
+pytest
+testcontainers
+requests
+bitmath
+pytest-dependency
+paramiko

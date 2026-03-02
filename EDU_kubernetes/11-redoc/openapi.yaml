@@ -1,0 +1,417 @@
+openapi: 3.0.3
+
+info:
+  title: E-Commerce API
+  version: 1.0.0
+  description: |
+    ## 개요
+    E-Commerce 플랫폼의 REST API 명세입니다.
+
+    이 문서는 **ReDoc**으로 렌더링되며, OpenAPI 3.0 명세에서 자동 생성되었습니다.
+
+    ### 인증
+    모든 API 요청에는 `Authorization` 헤더에 Bearer 토큰이 필요합니다.
+
+    ```
+    Authorization: Bearer <your-token>
+    ```
+
+    ### 에러 응답 형식
+    모든 에러는 아래 형식으로 반환됩니다:
+    ```json
+    {
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "상품을 찾을 수 없습니다"
+      }
+    }
+    ```
+  contact:
+    name: EDU API Support
+    email: support@example.com
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:3001
+    description: 로컬 개발 서버
+  - url: https://api-staging.example.com
+    description: 스테이징 서버
+  - url: https://api.example.com
+    description: 프로덕션 서버
+
+tags:
+  - name: Products
+    description: |
+      상품 관리 API
+
+      상품의 CRUD 및 검색 기능을 제공합니다.
+      상품 가격은 원(KRW) 단위입니다.
+  - name: Orders
+    description: |
+      주문 관리 API
+
+      주문 생성, 조회, 상태 변경 기능을 제공합니다.
+  - name: Auth
+    description: |
+      인증 API
+
+      로그인, 토큰 갱신 기능을 제공합니다.
+
+paths:
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: 로그인
+      description: |
+        이메일과 비밀번호로 로그인하여 JWT 토큰을 발급받습니다.
+
+        - Access Token: 1시간 유효
+        - Refresh Token: 7일 유효
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "user@example.com"
+                password:
+                  type: string
+                  format: password
+                  example: "Str0ng!Pass"
+      responses:
+        '200':
+          description: 로그인 성공
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+                    example: "eyJhbGciOiJIUzI1NiIs..."
+                  refreshToken:
+                    type: string
+                    example: "eyJhbGciOiJIUzI1NiIs..."
+                  expiresIn:
+                    type: integer
+                    example: 3600
+                    description: Access Token 유효 시간 (초)
+        '401':
+          description: 인증 실패
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: "UNAUTHORIZED"
+                  message: "이메일 또는 비밀번호가 틀립니다"
+
+  /api/products:
+    get:
+      tags: [Products]
+      summary: 상품 목록 조회
+      description: |
+        등록된 상품 목록을 조회합니다.
+
+        **페이지네이션**과 **카테고리 필터**를 지원합니다.
+      parameters:
+        - name: category
+          in: query
+          description: 카테고리 필터
+          schema:
+            type: string
+            enum: [전자제품, 의류, 도서]
+        - name: page
+          in: query
+          description: 페이지 번호 (1부터 시작)
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          description: 페이지당 항목 수
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: sort
+          in: query
+          description: 정렬 기준
+          schema:
+            type: string
+            enum: [price_asc, price_desc, created_at, name]
+            default: created_at
+      responses:
+        '200':
+          description: 상품 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Product'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+    post:
+      tags: [Products]
+      summary: 새 상품 등록
+      description: 새로운 상품을 등록합니다. **관리자 권한** 필요.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+      responses:
+        '201':
+          description: 등록 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          description: 유효성 검사 실패
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/products/{id}:
+    get:
+      tags: [Products]
+      summary: 상품 상세 조회
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: 상품 ID
+      responses:
+        '200':
+          description: 상품 상세
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          description: 상품 없음
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags: [Products]
+      summary: 상품 수정
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+      responses:
+        '200':
+          description: 수정 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+    delete:
+      tags: [Products]
+      summary: 상품 삭제
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: 삭제 성공
+
+  /api/orders:
+    post:
+      tags: [Orders]
+      summary: 주문 생성
+      description: |
+        새로운 주문을 생성합니다.
+
+        ### 주문 처리 흐름
+        1. 주문 생성 (status: `pending`)
+        2. 결제 처리 → `paid`
+        3. 배송 시작 → `shipped`
+        4. 배송 완료 → `delivered`
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [productId, quantity]
+                    properties:
+                      productId:
+                        type: integer
+                        example: 1
+                      quantity:
+                        type: integer
+                        minimum: 1
+                        example: 2
+                shippingAddress:
+                  type: string
+                  example: "서울시 강남구 테헤란로 123"
+      responses:
+        '201':
+          description: 주문 생성 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Product:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: "MacBook Pro 14"
+        description:
+          type: string
+          example: "M3 Pro 칩 탑재 노트북"
+        price:
+          type: number
+          example: 2990000
+          description: "가격 (원)"
+        stock:
+          type: integer
+          example: 50
+        category:
+          type: string
+          example: "전자제품"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2024-01-15T09:30:00Z"
+
+    ProductInput:
+      type: object
+      required: [name, price]
+      properties:
+        name:
+          type: string
+          example: "Galaxy S24"
+        description:
+          type: string
+          example: "최신 스마트폰"
+        price:
+          type: number
+          example: 1350000
+        stock:
+          type: integer
+          example: 100
+        category:
+          type: string
+          example: "전자제품"
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 42
+        userId:
+          type: integer
+          example: 1
+        status:
+          type: string
+          enum: [pending, paid, shipped, delivered, cancelled]
+          example: "pending"
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              productId:
+                type: integer
+              productName:
+                type: string
+              quantity:
+                type: integer
+              unitPrice:
+                type: number
+        totalAmount:
+          type: number
+          example: 5980000
+        createdAt:
+          type: string
+          format: date-time
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 20
+        totalItems:
+          type: integer
+          example: 150
+        totalPages:
+          type: integer
+          example: 8
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: "NOT_FOUND"
+            message:
+              type: string
+              example: "리소스를 찾을 수 없습니다"

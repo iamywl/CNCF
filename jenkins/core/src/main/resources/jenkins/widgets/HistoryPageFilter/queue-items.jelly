@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+The MIT License
+
+Copyright (c) 2004-2009, Sun Microsystems, Inc., Kohsuke Kawaguchi, Seiji Sogabe
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+-->
+
+<!--
+  Render queued items.
+-->
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:l="/lib/layout">
+    <!-- pending build -->
+    <j:set var="queuedItems" value="${it.queueItems}"/>
+    <j:if test="${!queuedItems.isEmpty()}">
+        <span class="app-builds-container__heading">${%Pending}</span>
+        <j:forEach var="pageEntry" items="${queuedItems}" indexVar="i">
+            <j:set var="item" value="${pageEntry.entry}"/>
+            <j:set var="id" value="${h.generateId()}"/>
+
+            <div class="app-builds-container__item app-builds-container__item--not-interactable" page-entry-id="${pageEntry.entryId}">
+                <div class="app-builds-container__item__icon">
+                    <l:icon src="symbol-status-nobuilt" />
+                </div>
+                <div class="app-builds-container__item__inner">
+                    <div class="app-builds-container__item__inner__link">
+                        <!-- Don't use math unless needed, in case nextBuildNumber is not numeric -->
+                        #${queuedItems.size() == 1 ? it.widget.owner.nextBuildNumber : it.widget.owner.nextBuildNumber+queuedItems.size()-i-1}
+                    </div>
+                    <div class="app-builds-container__item__inner__controls">
+                        <j:if test="${!item.params.isEmpty()}">
+                            <div tooltip="Build Parameters: ${item.params}" data-tooltip-append-to-parent="true">
+                                <l:icon src="symbol-parameters" class="icon-sm" />
+                            </div>
+                        </j:if>
+                        <j:if test="${item.hasCancelPermission()}">
+                            <l:stopButton href="${rootURL}/queue/cancelItem?id=${item.id}" alt="${%Cancel}"/>
+                        </j:if>
+                    </div>
+                </div>
+                <div class="app-builds-container__item__description">
+                    <j:set var="cause" value="${item.getCauseOfBlockage()}"/>
+                    <j:choose>
+                        <j:when test="${cause!=null}">
+                            <st:include it="${cause}" page="summary.jelly"/>
+                        </j:when>
+                    </j:choose>
+                </div>
+            </div>
+        </j:forEach>
+    </j:if>
+</j:jelly>

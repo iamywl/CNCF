@@ -1,0 +1,13 @@
+{
+  "name": "edu-jsdoc",
+  "version": "1.0.0",
+  "description": "JSDoc 자동 문서 생성 POC",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "docs": "jsdoc -c jsdoc.json"
+  },
+  "devDependencies": {
+    "jsdoc": "^4.0.2"
+  }
+}

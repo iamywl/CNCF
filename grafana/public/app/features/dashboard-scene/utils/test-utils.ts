@@ -1,0 +1,517 @@
+import { VariableRefresh } from '@grafana/data';
+import { FetchError } from '@grafana/runtime';
+import {
+  DeepPartial,
+  EmbeddedScene,
+  SceneDeactivationHandler,
+  sceneGraph,
+  SceneGridLayout,
+  SceneGridRow,
+  SceneObject,
+  SceneTimeRange,
+  SceneVariableSet,
+  TestVariable,
+  VizPanel,
+} from '@grafana/scenes';
+import {
+  defaultTimeSettingsSpec,
+  defaultPanelSpec,
+  Spec as DashboardV2Spec,
+  defaultSpec as defaultDashboardV2Spec,
+} from '@grafana/schema/apis/dashboard.grafana.app/v2';
+import { DashboardLoaderSrv, setDashboardLoaderSrv } from 'app/features/dashboard/services/DashboardLoaderSrv';
+import { getLayoutType } from 'app/features/dashboard/utils/tracking';
+import { ALL_VARIABLE_TEXT, ALL_VARIABLE_VALUE } from 'app/features/variables/constants';
+import { DashboardDTO } from 'app/types/dashboard';
+
+import { DashboardScene } from '../scene/DashboardScene';
+import { VizPanelLinks, VizPanelLinksMenu } from '../scene/PanelLinks';
+import { AutoGridLayout } from '../scene/layout-auto-grid/AutoGridLayout';
+import { DashboardGridItem, RepeatDirection } from '../scene/layout-default/DashboardGridItem';
+import { DefaultGridLayoutManager } from '../scene/layout-default/DefaultGridLayoutManager';
+import { RowRepeaterBehavior } from '../scene/layout-default/RowRepeaterBehavior';
+import { RowItem } from '../scene/layout-rows/RowItem';
+import { RowsLayoutManager } from '../scene/layout-rows/RowsLayoutManager';
+import { TabItem } from '../scene/layout-tabs/TabItem';
+import { TabsLayoutManager } from '../scene/layout-tabs/TabsLayoutManager';
+import { DashboardLayoutGrid } from '../scene/types/DashboardLayoutGrid';
+import { transformSaveModelSchemaV2ToScene } from '../serialization/transformSaveModelSchemaV2ToScene';
+import { transformSceneToSaveModelSchemaV2 } from '../serialization/transformSceneToSaveModelSchemaV2';
+
+export function setupLoadDashboardMock(rsp: DeepPartial<DashboardDTO>, spy?: jest.Mock) {
+  const loadDashboardMock = (spy || jest.fn()).mockResolvedValue(rsp);
+  const loadSnapshotMock = (spy || jest.fn()).mockResolvedValue(rsp);
+  // disabling type checks since this is a test util
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+  setDashboardLoaderSrv({
+    loadDashboard: loadDashboardMock,
+    loadSnapshot: loadSnapshotMock,
+  } as unknown as DashboardLoaderSrv);
+  return loadDashboardMock;
+}
+export function setupLoadDashboardMockReject(rsp: DeepPartial<FetchError>, spy?: jest.Mock) {
+  const loadDashboardMock = (spy || jest.fn()).mockRejectedValue(rsp);
+  // disabling type checks since this is a test util
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+  setDashboardLoaderSrv({
+    loadDashboard: loadDashboardMock,
+  } as unknown as DashboardLoaderSrv);
+  return loadDashboardMock;
+}
+
+export function setupLoadDashboardRuntimeErrorMock() {
+  // disabling type checks since this is a test util
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+  setDashboardLoaderSrv({
+    loadDashboard: () => {
+      throw new Error('Runtime error');
+    },
+  } as unknown as DashboardLoaderSrv);
+}
+
+export function mockResizeObserver() {
+  window.ResizeObserver = class ResizeObserver {
+    constructor(callback: ResizeObserverCallback) {
+      setTimeout(() => {
+        callback(
+          [
+            // disabling type checks since this is a test util
+            // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+            {
+              contentRect: {
+                x: 1,
+                y: 2,
+                width: 500,
+                height: 500,
+                top: 100,
+                bottom: 0,
+                left: 100,
+                right: 0,
+              },
+            } as ResizeObserverEntry,
+          ],
+          this
+        );
+      });
+    }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  };
+}
+
+/**
+ * Useful from tests to simulate mounting a full scene. Children are activated before parents to simulate the real order
+ * of React mount order and useEffect ordering.
+ *
+ */
+export function activateFullSceneTree(scene: SceneObject): SceneDeactivationHandler {
+  const deactivationHandlers: SceneDeactivationHandler[] = [];
+
+  // Important that variables are activated before other children
+  if (scene.state.$variables) {
+    deactivationHandlers.push(activateFullSceneTree(scene.state.$variables));
+  }
+
+  scene.forEachChild((child) => {
+    // For query runners which by default use the container width for maxDataPoints calculation we are setting a width.
+    // In real life this is done by the React component when VizPanel is rendered.
+    if ('setContainerWidth' in child) {
+      // @ts-expect-error
+      child.setContainerWidth(500);
+    }
+    deactivationHandlers.push(activateFullSceneTree(child));
+  });
+
+  deactivationHandlers.push(scene.activate());
+
+  return () => {
+    for (const handler of deactivationHandlers) {
+      handler();
+    }
+  };
+}
+
+interface SceneOptions {
+  variableQueryTime: number;
+  maxPerRow?: number;
+  itemHeight?: number;
+  repeatDirection?: RepeatDirection;
+  x?: number;
+  y?: number;
+  numberOfOptions?: number;
+  usePanelRepeater?: boolean;
+  useRowRepeater?: boolean;
+  throwError?: string;
+  variableRefresh?: VariableRefresh;
+}
+
+export function buildPanelRepeaterScene(options: SceneOptions, source?: VizPanel) {
+  const defaults = { usePanelRepeater: true, ...options };
+
+  const withRepeat = new DashboardGridItem({
+    variableName: 'server',
+    repeatedPanels: [],
+    repeatDirection: options.repeatDirection,
+    maxPerRow: options.maxPerRow,
+    itemHeight: options.itemHeight,
+    body:
+      source ??
+      new VizPanel({
+        title: 'Panel $server',
+        pluginId: 'timeseries',
+        key: 'panel-1',
+      }),
+    x: options.x || 0,
+    y: options.y || 0,
+  });
+
+  const withoutRepeat = new DashboardGridItem({
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    body: new VizPanel({
+      title: 'Panel $server',
+      pluginId: 'timeseries',
+      titleItems: [new VizPanelLinks({ menu: new VizPanelLinksMenu({}) })],
+    }),
+  });
+
+  const row = new SceneGridRow({
+    $behaviors: defaults.useRowRepeater ? [new RowRepeaterBehavior({ variableName: 'handler' })] : [],
+    children: [defaults.usePanelRepeater ? withRepeat : withoutRepeat],
+  });
+
+  const panelRepeatVariable = new TestVariable({
+    name: 'server',
+    query: 'A.*',
+    value: ALL_VARIABLE_VALUE,
+    text: ALL_VARIABLE_TEXT,
+    isMulti: true,
+    includeAll: true,
+    delayMs: options.variableQueryTime,
+    optionsToReturn: [
+      { label: 'A', value: '1' },
+      { label: 'B', value: '2' },
+      { label: 'C', value: '3' },
+      { label: 'D', value: '4' },
+      { label: 'E', value: '5' },
+    ].slice(0, options.numberOfOptions),
+    throwError: defaults.throwError,
+    refresh: options.variableRefresh,
+  });
+
+  const rowRepeatVariable = new TestVariable({
+    name: 'handler',
+    query: 'A.*',
+    value: ALL_VARIABLE_VALUE,
+    text: ALL_VARIABLE_TEXT,
+    isMulti: true,
+    includeAll: true,
+    delayMs: options.variableQueryTime,
+    optionsToReturn: [
+      { label: 'AA', value: '11' },
+      { label: 'BB', value: '22' },
+      { label: 'CC', value: '33' },
+      { label: 'DD', value: '44' },
+      { label: 'EE', value: '55' },
+    ].slice(0, options.numberOfOptions),
+    throwError: defaults.throwError,
+  });
+
+  const scene = new EmbeddedScene({
+    $timeRange: new SceneTimeRange({ from: 'now-6h', to: 'now' }),
+    $variables: new SceneVariableSet({
+      variables: [panelRepeatVariable, rowRepeatVariable],
+    }),
+    body: new DefaultGridLayoutManager({
+      grid: new SceneGridLayout({
+        children: [row],
+      }),
+    }),
+  });
+
+  return { scene, repeater: withRepeat, row, variable: panelRepeatVariable };
+}
+
+export function getTestDashboardSceneFromSaveModel(spec?: Partial<DashboardV2Spec>) {
+  const dashboard = transformSaveModelSchemaV2ToScene({
+    kind: 'DashboardWithAccessInfo',
+    spec: {
+      ...defaultDashboardV2Spec(),
+      title: 'hello',
+      timeSettings: {
+        ...defaultTimeSettingsSpec(),
+        autoRefresh: '10s',
+        from: 'now-1h',
+        to: 'now',
+      },
+      elements: {
+        'panel-1': {
+          kind: 'Panel',
+          spec: {
+            ...defaultPanelSpec(),
+            id: 1,
+            title: 'Panel 1',
+          },
+        },
+      },
+      layout: {
+        kind: 'GridLayout',
+        spec: {
+          items: [
+            {
+              kind: 'GridLayoutItem',
+              spec: {
+                x: 0,
+                y: 0,
+                width: 12,
+                height: 8,
+                element: {
+                  kind: 'ElementReference',
+                  name: 'panel-1',
+                },
+              },
+            },
+          ],
+        },
+      },
+      variables: [
+        {
+          kind: 'CustomVariable',
+          spec: {
+            name: 'app',
+            label: 'Query Variable',
+            description: 'A query variable',
+            skipUrlSync: false,
+            hide: 'dontHide',
+            options: [],
+            multi: false,
+            current: {
+              text: 'app1',
+              value: 'app1',
+            },
+            query: 'app1',
+            allValue: '',
+            includeAll: false,
+            allowCustomValue: true,
+          },
+        },
+      ],
+      ...spec,
+    },
+    apiVersion: 'v1',
+    metadata: {
+      name: 'dashboard-test',
+      resourceVersion: '1',
+      creationTimestamp: '2023-01-01T00:00:00Z',
+    },
+    access: {
+      canEdit: true,
+      canSave: true,
+      canStar: true,
+      canShare: true,
+    },
+  });
+
+  const initialSaveModel = transformSceneToSaveModelSchemaV2(dashboard);
+  dashboard.setInitialSaveModel(initialSaveModel);
+
+  return dashboard;
+}
+
+// returns e.g. data-testid Layout container row Row title
+export function getTestIdForLayout(model: AutoGridLayout | DashboardLayoutGrid) {
+  const parentRowOrTab = sceneGraph.findObject(
+    model,
+    (currentSceneObject) => currentSceneObject instanceof RowItem || currentSceneObject instanceof TabItem
+  );
+  if (parentRowOrTab instanceof TabItem || parentRowOrTab instanceof RowItem) {
+    return `${getLayoutType(parentRowOrTab)} ${parentRowOrTab.state.title}`;
+  }
+
+  return '';
+}
+
+export type TabsTestSetup = {
+  name: string;
+
+  /**
+   * Spec defining rows and tabs structure:
+   * - each string represents tabs in a separate row
+   * - a single letter represents a single tab
+   * - joined letters represent repeated tabs
+   *
+   * Example:
+   * tabs: ["a b cd"] - single row with 3 tabs: "a", "b", and "cd" (where "cd" is a repeated tab with 2 instances)
+   */
+  tabs: string[];
+
+  /**
+   * Single letter representing a drag source tab
+   */
+  drag: string;
+
+  /**
+   * Single letter representing a drag target tab
+   */
+  drop: string;
+
+  /**
+   * Expected tabs structure after drag and drop operation, same format as `tabs` input
+   */
+  expected: string[];
+
+  /**
+   * Used only when dragging between rows to indicate whether to drop before or after the target tab.
+   * Dragging within the same row just replaces tabs so it's not used.
+   */
+  after?: boolean;
+};
+
+/**
+ * Setups a tabs drag and drop test scenario
+ */
+export function setupTabsTest(senario: TabsTestSetup) {
+  const allChars = senario.tabs.join('');
+  const dragCount = allChars.split(senario.drag).length - 1;
+  const dropCount = allChars.split(senario.drop).length - 1;
+
+  if (dragCount > 1) {
+    throw new Error(`Drag tab "${senario.drag}" is defined ${dragCount} times in the setup. It must be unique.`);
+  }
+
+  if (dropCount > 1) {
+    throw new Error(`Drop tab "${senario.drop}" is defined ${dropCount} times in the setup. It must be unique.`);
+  }
+
+  let drag: TabItem | undefined = undefined;
+  let destIndex = 0;
+  let destManager: TabsLayoutManager | undefined = undefined;
+  let sourceManager: TabsLayoutManager | undefined = undefined;
+
+  const managers: TabsLayoutManager[] = [];
+
+  const rows = senario.tabs.map((tabsInRow) => {
+    const names = tabsInRow.split(' ');
+    const tabs: TabItem[] = [];
+    const layout = new TabsLayoutManager({ tabs: [] });
+    managers.push(layout);
+
+    let index = 0;
+    names.forEach((name) => {
+      const title = name[0];
+      const tab = new TabItem({ title });
+
+      if (title === senario.drag) {
+        drag = tab;
+        sourceManager = layout;
+      }
+
+      if (title === senario.drop) {
+        destManager = layout;
+        destIndex = senario.after ? index + 1 : index;
+      }
+
+      index++;
+
+      if (name.length > 1) {
+        const repeatedTabs = name
+          .slice(1)
+          .split('')
+          .map((title) => {
+            if (title === senario.drop) {
+              destManager = layout;
+              destIndex = senario.after ? index + 1 : index;
+            }
+            index++;
+            return new TabItem({ title, repeatSourceKey: tab.state.key });
+          });
+        tab.setState({ repeatedTabs });
+      }
+
+      tabs.push(tab);
+    });
+    layout.setState({ tabs });
+    return new RowItem({ layout });
+  });
+  const rowsManager = new RowsLayoutManager({ rows });
+  const dashboard = new DashboardScene({ body: rowsManager });
+  dashboard.activate?.();
+  const orchestrator = dashboard.state.layoutOrchestrator!;
+
+  function simulateMoveOverTheSameManager() {
+    document.body.dispatchEvent(new MouseEvent('pointerdown'));
+    orchestrator.startTabDrag(sourceManager!.state.key!, drag!.state.key!);
+
+    document.body.dispatchEvent(new MouseEvent('pointermove'));
+    // @ts-expect-error - accessing private property for testing
+    orchestrator._lastDropTarget = undefined; // orchestrator keeps track only of different targets
+
+    document.body.dispatchEvent(new MouseEvent('pointerup'));
+    // @ts-expect-error - accessing private property for testing
+    orchestrator._targetTabIndex = -1; // orchestrator will show no valid index as lastDropTargetIs undefined
+    orchestrator.stopTabDrag(destIndex); // hello-pangea provides the index
+  }
+
+  function simulateMoveOverDifferentManager() {
+    document.body.dispatchEvent(new MouseEvent('pointerdown'));
+    orchestrator.startTabDrag(sourceManager!.state.key!, drag!.state.key!);
+
+    document.body.dispatchEvent(new MouseEvent('pointermove'));
+    // @ts-expect-error - accessing private property for testing
+    orchestrator._lastDropTarget = destManager!;
+
+    document.body.dispatchEvent(new MouseEvent('pointerup'));
+    // @ts-expect-error - accessing private property for testing
+    orchestrator._targetTabIndex = destIndex;
+    orchestrator.stopTabDrag(undefined);
+  }
+
+  return {
+    performDrag: () => {
+      if (sourceManager!.state.key! === destManager!.state.key!) {
+        simulateMoveOverTheSameManager();
+      } else {
+        simulateMoveOverDifferentManager();
+      }
+    },
+    assertExpectedTabs: () => {
+      const all = managers.map((manager) => {
+        const tabs = manager.getTabsIncludingRepeats();
+        return getTabGroups(tabs);
+      });
+      expect(all).toEqual(senario.expected);
+    },
+    assertInitialTabs: () => {
+      const all = managers.map((manager) => {
+        const tabs = manager.getTabsIncludingRepeats();
+        return getTabGroups(tabs);
+      });
+      expect(all).toEqual(senario.tabs);
+    },
+  };
+}
+
+function getTabGroups(tabs: TabItem[]): string {
+  const groups: string[] = [];
+  let currentGroup = '';
+
+  tabs.forEach((tab) => {
+    if (tab.state.repeatSourceKey) {
+      currentGroup += tab.state.title;
+    } else {
+      if (currentGroup) {
+        groups.push(currentGroup);
+      }
+      currentGroup = tab.state.title || '';
+    }
+  });
+
+  if (currentGroup) {
+    groups.push(currentGroup);
+  }
+
+  return groups.join(' ');
+}

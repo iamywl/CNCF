@@ -1,0 +1,61 @@
+<!--
+The MIT License
+
+Copyright (c) 2004-2009, Sun Microsystems, Inc., Kohsuke Kawaguchi, Tom Huybrechts, Yahoo! Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+-->
+
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:d="jelly:define" xmlns:l="/lib/layout" xmlns:t="/lib/hudson" xmlns:f="/lib/form">
+  <st:documentation>
+    Renders ${it.description} and then allow it to be editable in place,
+    if the current user has the specified permission.
+
+    <st:attribute name="permission" use="required">
+      If the current user doesn't have this permission, the description
+      is not editable.
+    </st:attribute>
+    <st:attribute name="description">
+      Optional value of the description. If not specified, will use '${it.description}'.
+    </st:attribute>
+    <st:attribute name="submissionUrl">
+      Optional submission URL. If not specified, will use 'submitDescription'.
+    </st:attribute>
+    <st:attribute name="hideButton">
+      Hide the add/edit description button. Set to true when the button is provided via the app bar.
+      See 'editDescriptionButton'
+    </st:attribute>
+  </st:documentation>
+
+  <j:set var="actualDescription" value="${description}" defaultValue="${it.description}"/>
+  <j:set var="hideDescriptionButton" value="${hideButton}" defaultValue="false"/>
+
+  <div id="description">
+    <div id="description-content">
+      <j:out value="${actualDescription!=null ? app.markupFormatter.translate(actualDescription) : ''}" />
+    </div>
+    <div id="description-edit-form" class="jenkins-hidden"/>
+    <j:if test="${!hideDescriptionButton}">
+      <div class="jenkins-buttons-row jenkins-buttons-row--invert description-edit-button">
+        <t:editDescriptionButton permission="${permission}" description="${actualDescription}" submissionUrl="${submissionUrl}"/>
+      </div>
+    </j:if>
+  </div>
+</j:jelly>

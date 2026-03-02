@@ -1,0 +1,77 @@
+<!--
+The MIT License
+
+Copyright (c) 2004-2010, Sun Microsystems, Inc., Kohsuke Kawaguchi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+-->
+<!--
+  Edit View Page
+-->
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:d="jelly:define" xmlns:l="/lib/layout" xmlns:t="/lib/hudson" xmlns:f="/lib/form" xmlns:i="jelly:fmt">
+<st:adjunct includes="hudson.model.ListView.configure-entries-resources" />
+  <f:section title="${%Jobs}" description="${%jobs.description}">
+    <f:entry field="recurse">
+      <f:checkbox title="${%Recurse in subfolders}" id="recurse" />
+    </f:entry>
+
+    <d:taglib uri="local">
+      <d:tag name="checkbox">
+        <f:checkbox name="item_${job.getRelativeNameFromGroup(it.ownerItemGroup)}"
+                    checked="${it.jobNamesContains(job)}"
+                    title="${job.displayName}"
+                    tooltip="${!job.fullName.equals(job.displayName) ? job.fullName : null}"
+                    json="true" />
+        <j:if test="${job.getItems().size() gt 0}">
+          <div class="listview-jobs listview-jobs--nested" style="${it.recurse ? '' : 'display: none'}">
+            <j:forEach var="job" items="${job.getItems()}">
+              <local:checkbox xmlns:local="local" job="${job}" />
+            </j:forEach>
+          </div>
+        </j:if>
+      </d:tag>
+    </d:taglib>
+
+    <f:entry>
+      <div class="listview-jobs" xmlns:local="local">
+        <j:forEach var="job" items="${it.ownerItemGroup.getItems()}">
+          <local:checkbox job="${job}" />
+        </j:forEach>
+      </div>
+    </f:entry>
+
+    <f:optionalBlock name="useincluderegex" title="${%Use a regular expression to include jobs into the view}"
+                     checked="${it.includeRegex != null}" help="/help/view-config/includeregex.html">
+      <f:entry title="${%Regular expression}">
+        <f:textbox name="includeRegex" field="includeRegex" />
+      </f:entry>
+    </f:optionalBlock>
+  </f:section>
+
+  <j:if test="${it.hasJobFilterExtensions()}">
+    <f:section title="${%Filters}" description="${%filters.description}">
+      <f:repeatableHeteroProperty field="jobFilters" hasHeader="true" addCaption="${%Add Job Filter}" />
+    </f:section>
+  </j:if>
+
+  <f:section title="${%Columns}" description="${%columns.description}">
+    <f:repeatableHeteroProperty field="columns" hasHeader="true" addCaption="${%Add column}"/>
+  </f:section>
+</j:jelly>

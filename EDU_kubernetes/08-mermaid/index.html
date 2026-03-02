@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Mermaid.js — 다이어그램 갤러리</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; }
+        h1 { color: #e94560; border-bottom: 2px solid #e94560; padding-bottom: 10px; }
+        h2 { color: #0f3460; background: #e94560; display: inline-block; padding: 5px 15px; border-radius: 4px; color: white; margin-top: 40px; }
+        .diagram-container { background: white; border-radius: 8px; padding: 20px; margin: 20px 0; color: #333; }
+        .code-block { background: #16213e; border-radius: 8px; padding: 15px; margin: 10px 0; overflow-x: auto; }
+        .code-block code { color: #a8dadc; font-size: 14px; white-space: pre; }
+        .tip { background: #0f3460; border-left: 4px solid #e94560; padding: 15px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+    </style>
+</head>
+<body>
+    <h1>Mermaid.js — 코드로 그리는 다이어그램</h1>
+    <p>아래의 모든 다이어그램은 텍스트 코드에서 자동 생성되었습니다.</p>
+
+    <!-- ===== 1. Flowchart ===== -->
+    <h2>1. 플로우차트 (Flowchart)</h2>
+    <div class="tip">프로세스 흐름, 의사결정 트리, 알고리즘을 표현할 때 사용합니다.</div>
+    <div class="code-block"><code>graph TD
+    Start([시작]) --> InputAge[/나이 입력/]
+    InputAge --> CheckAge{19세 이상?}
+    CheckAge -->|Yes| Adult[성인 인증 완료]
+    CheckAge -->|No| Minor[미성년자 안내]
+    Adult --> Purchase[구매 진행]
+    Minor --> End([종료])</code></div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+graph TD
+    Start([시작]) --> InputAge[/나이 입력/]
+    InputAge --> CheckAge{19세 이상?}
+    CheckAge -->|Yes| Adult[성인 인증 완료]
+    CheckAge -->|No| Minor[미성년자 안내]
+    Adult --> Purchase[구매 진행]
+    Minor --> End([종료])
+        </pre>
+    </div>
+
+    <!-- ===== 2. Sequence Diagram ===== -->
+    <h2>2. 시퀀스 다이어그램</h2>
+    <div class="tip">객체 간 메시지 교환 순서를 시간 흐름에 따라 표현합니다.</div>
+    <div class="code-block"><code>sequenceDiagram
+    participant B as Browser
+    participant S as Server
+    participant D as Database
+    B->>S: GET /api/users
+    activate S
+    S->>D: SELECT * FROM users
+    D-->>S: 결과 반환
+    S-->>B: JSON 응답
+    deactivate S</code></div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+sequenceDiagram
+    participant B as Browser
+    participant S as Server
+    participant D as Database
+    B->>S: GET /api/users
+    activate S
+    S->>D: SELECT * FROM users
+    D-->>S: 결과 반환
+    S-->>B: JSON 응답
+    deactivate S
+        </pre>
+    </div>
+
+    <!-- ===== 3. Class Diagram ===== -->
+    <h2>3. 클래스 다이어그램</h2>
+    <div class="tip">OOP의 클래스 구조, 상속, 연관 관계를 표현합니다.</div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+classDiagram
+    class Animal {
+        +String name
+        +int age
+        +makeSound() void
+    }
+    class Dog {
+        +String breed
+        +fetch() void
+        +makeSound() void
+    }
+    class Cat {
+        +bool isIndoor
+        +purr() void
+        +makeSound() void
+    }
+    class Owner {
+        +String name
+        +List~Animal~ pets
+        +adopt(Animal) void
+    }
+
+    Animal <|-- Dog : 상속
+    Animal <|-- Cat : 상속
+    Owner "1" --> "*" Animal : 소유
+        </pre>
+    </div>
+
+    <!-- ===== 4. State Diagram ===== -->
+    <h2>4. 상태 다이어그램</h2>
+    <div class="tip">주문, 결제 등 상태 전이를 표현할 때 유용합니다.</div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+stateDiagram-v2
+    [*] --> 주문접수
+    주문접수 --> 결제대기 : 주문 확인
+    결제대기 --> 결제완료 : 결제 성공
+    결제대기 --> 주문취소 : 결제 실패
+    결제완료 --> 배송준비 : 상품 포장
+    배송준비 --> 배송중 : 택배 접수
+    배송중 --> 배송완료 : 수령 확인
+    배송완료 --> [*]
+    주문취소 --> [*]
+
+    배송중 --> 반품요청 : 반품 신청
+    반품요청 --> 반품완료 : 반품 처리
+    반품완료 --> [*]
+        </pre>
+    </div>
+
+    <!-- ===== 5. ERD ===== -->
+    <h2>5. ERD (Entity Relationship Diagram)</h2>
+    <div class="tip">데이터베이스 테이블 간 관계를 표현합니다.</div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+erDiagram
+    CUSTOMER {
+        int id PK
+        string name
+        string email
+    }
+    ORDER {
+        int id PK
+        int customer_id FK
+        date created_at
+    }
+    PRODUCT {
+        int id PK
+        string name
+        float price
+    }
+    ORDER_ITEM {
+        int order_id FK
+        int product_id FK
+        int quantity
+    }
+
+    CUSTOMER ||--o{ ORDER : "주문"
+    ORDER ||--|{ ORDER_ITEM : "포함"
+    PRODUCT ||--o{ ORDER_ITEM : "주문됨"
+        </pre>
+    </div>
+
+    <!-- ===== 6. Gantt Chart ===== -->
+    <h2>6. 간트 차트</h2>
+    <div class="tip">프로젝트 일정 관리에 사용합니다.</div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+gantt
+    title 프로젝트 일정
+    dateFormat  YYYY-MM-DD
+    section 기획
+        요구사항 분석     :a1, 2024-01-01, 7d
+        화면 설계         :a2, after a1, 5d
+    section 개발
+        백엔드 API       :b1, after a2, 14d
+        프론트엔드 UI    :b2, after a2, 14d
+        DB 설계          :b3, after a2, 7d
+    section 테스트
+        통합 테스트       :c1, after b1, 7d
+        UAT              :c2, after c1, 5d
+    section 배포
+        스테이징 배포     :d1, after c2, 2d
+        프로덕션 배포     :d2, after d1, 1d
+        </pre>
+    </div>
+
+    <!-- ===== 7. Pie Chart ===== -->
+    <h2>7. 파이 차트</h2>
+    <div class="tip">비율을 시각화할 때 사용합니다.</div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+pie title 프로그래밍 언어 사용 비율
+    "JavaScript" : 35
+    "Python" : 28
+    "Go" : 18
+    "Java" : 12
+    "기타" : 7
+        </pre>
+    </div>
+
+    <!-- ===== 8. Git Graph ===== -->
+    <h2>8. Git 그래프</h2>
+    <div class="tip">Git 브랜치 전략을 시각화합니다.</div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+gitGraph
+    commit id: "init"
+    commit id: "feature-start"
+    branch feature/login
+    commit id: "add-login-form"
+    commit id: "add-auth-api"
+    checkout main
+    commit id: "hotfix-typo"
+    merge feature/login id: "merge-login"
+    branch feature/dashboard
+    commit id: "add-dashboard"
+    checkout main
+    merge feature/dashboard id: "merge-dashboard"
+    commit id: "release-v1.0" tag: "v1.0"
+        </pre>
+    </div>
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>

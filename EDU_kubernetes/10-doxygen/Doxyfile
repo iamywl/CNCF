@@ -1,0 +1,37 @@
+# Doxygen 설정 파일
+# doxygen Doxyfile 명령으로 HTML 문서 생성
+
+PROJECT_NAME           = "Calculator Library"
+PROJECT_NUMBER         = "1.0.0"
+PROJECT_BRIEF          = "Doxygen 문서화 POC"
+OUTPUT_DIRECTORY       = docs
+INPUT                  = src/
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.c
+
+# HTML 문서 생성
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+
+# LaTeX/PDF는 생성하지 않음
+GENERATE_LATEX         = NO
+
+# 소스코드 참조 링크
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+
+# 콜 그래프 (Graphviz 필요)
+HAVE_DOT               = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+
+# 문서화되지 않은 항목도 포함
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+
+# 정렬
+SORT_MEMBER_DOCS       = YES
+
+# 언어
+OUTPUT_LANGUAGE        = Korean

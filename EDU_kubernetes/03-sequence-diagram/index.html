@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>시퀀스 다이어그램 - POC</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        h1 { color: #333; border-bottom: 2px solid #2ecc71; padding-bottom: 10px; }
+        h2 { color: #2ecc71; margin-top: 40px; }
+        .diagram-container { background: white; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .description { background: #eafaf1; border-left: 4px solid #2ecc71; padding: 15px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+    </style>
+</head>
+<body>
+    <h1>시퀀스 다이어그램 (Sequence Diagram)</h1>
+
+    <!-- ========== 시나리오 1: 로그인 ========== -->
+    <h2>1. 사용자 로그인 (JWT 인증)</h2>
+    <div class="description">
+        <strong>시나리오:</strong> 사용자가 이메일/비밀번호로 로그인하여 JWT 토큰을 발급받는 과정<br>
+        <strong>핵심:</strong> 동기 호출, 조건 분기(alt), 활성 구간(activate)
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+sequenceDiagram
+    actor User as 사용자
+    participant Client as 프론트엔드
+    participant API as API 서버
+    participant DB as 데이터베이스
+    participant Redis as Redis (세션)
+
+    User->>Client: 이메일 + 비밀번호 입력
+    Client->>API: POST /api/auth/login
+    activate API
+
+    API->>DB: SELECT * FROM user WHERE email = ?
+    activate DB
+    DB-->>API: 사용자 레코드
+    deactivate DB
+
+    alt 비밀번호 일치
+        API->>API: JWT 토큰 생성
+        API->>Redis: SET session:{userId} token
+        API-->>Client: 200 OK + { accessToken, refreshToken }
+        Client->>Client: localStorage에 토큰 저장
+        Client-->>User: 대시보드로 이동
+    else 비밀번호 불일치
+        API-->>Client: 401 Unauthorized
+        Client-->>User: "이메일 또는 비밀번호가 틀립니다" 표시
+    else 사용자 없음
+        API-->>Client: 401 Unauthorized
+        Client-->>User: "이메일 또는 비밀번호가 틀립니다" 표시
+    end
+
+    deactivate API
+
+    Note over Client,API: 보안: 사용자 없음과 비밀번호 불일치를<br/>동일한 메시지로 응답 (정보 유출 방지)
+        </pre>
+    </div>
+
+    <!-- ========== 시나리오 2: 주문 처리 ========== -->
+    <h2>2. 상품 주문 처리</h2>
+    <div class="description">
+        <strong>시나리오:</strong> 사용자가 상품을 주문하면 결제 → 재고 차감 → 알림이 순차적으로 처리<br>
+        <strong>핵심:</strong> 다중 서비스 간 호출 체인, 비동기 이벤트
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+sequenceDiagram
+    actor User as 사용자
+    participant API as 주문 API
+    participant OrderDB as 주문 DB
+    participant Payment as 결제 서비스
+    participant Inventory as 재고 서비스
+    participant Queue as 메시지 큐
+    participant Notifier as 알림 서비스
+
+    User->>API: POST /api/orders { productId, qty }
+    activate API
+
+    API->>OrderDB: INSERT order (status='pending')
+    activate OrderDB
+    OrderDB-->>API: orderId = 42
+    deactivate OrderDB
+
+    API->>Payment: POST /pay { orderId, amount }
+    activate Payment
+    Payment-->>API: 결제 성공 (txId: abc123)
+    deactivate Payment
+
+    API->>Inventory: PUT /stock/decrease { productId, qty }
+    activate Inventory
+    Inventory-->>API: 재고 차감 완료
+    deactivate Inventory
+
+    API->>OrderDB: UPDATE order SET status='paid'
+
+    API-)Queue: 주문 완료 이벤트 발행
+    Note right of Queue: 비동기 처리 시작
+
+    Queue-)Notifier: 이메일 발송 요청
+    activate Notifier
+    Notifier->>Notifier: 주문 확인 이메일 생성
+    Notifier-->>Queue: 발송 완료
+    deactivate Notifier
+
+    API-->>User: 200 OK { orderId: 42, status: 'paid' }
+    deactivate API
+        </pre>
+    </div>
+
+    <!-- ========== 시나리오 3: 에러 처리 / 롤백 ========== -->
+    <h2>3. 결제 실패 시 롤백</h2>
+    <div class="description">
+        <strong>시나리오:</strong> 결제가 실패했을 때 이미 생성된 주문을 취소하는 보상 트랜잭션<br>
+        <strong>핵심:</strong> alt 분기, 에러 응답, 보상 처리(Compensating Transaction)
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+sequenceDiagram
+    actor User as 사용자
+    participant API as 주문 API
+    participant OrderDB as 주문 DB
+    participant Payment as 결제 서비스
+
+    User->>API: POST /api/orders
+    activate API
+
+    API->>OrderDB: INSERT order (status='pending')
+    OrderDB-->>API: orderId = 43
+
+    API->>Payment: POST /pay { orderId: 43, amount }
+    activate Payment
+
+    alt 결제 성공
+        Payment-->>API: 200 OK
+        API->>OrderDB: UPDATE status='paid'
+        API-->>User: 주문 완료
+    else 잔액 부족
+        Payment-->>API: 402 Payment Required
+        API->>OrderDB: UPDATE status='cancelled'
+        API-->>User: "잔액이 부족합니다"
+    else 결제 시스템 장애
+        Payment-->>API: 503 Service Unavailable
+        API->>OrderDB: UPDATE status='payment_pending'
+        API-->>User: "결제 처리 중입니다. 잠시 후 확인해주세요."
+        Note over API,Payment: 재시도 큐에 등록하여<br/>자동 재시도 처리
+    end
+
+    deactivate Payment
+    deactivate API
+        </pre>
+    </div>
+
+    <!-- ========== 시나리오 4: 비동기 처리 ========== -->
+    <h2>4. 비동기 이메일 발송 (Queue 패턴)</h2>
+    <div class="description">
+        <strong>시나리오:</strong> 이메일 발송을 동기적으로 하지 않고 큐에 위임하여 응답 속도를 높이는 패턴<br>
+        <strong>핵심:</strong> 비동기 메시지(<code>-)</code>), loop, 실선 vs 점선 차이
+    </div>
+    <div class="diagram-container">
+        <pre class="mermaid">
+sequenceDiagram
+    participant API as API 서버
+    participant Queue as Redis Queue
+    participant Worker as Email Worker
+    participant SMTP as SMTP 서버
+
+    API-)Queue: LPUSH email:queue { to, subject, body }
+    Note right of API: API는 즉시 응답 반환<br/>(사용자를 기다리게 하지 않음)
+
+    loop 큐에 작업이 있는 동안
+        Worker->>Queue: BRPOP email:queue
+        activate Worker
+        Queue-->>Worker: { to, subject, body }
+        Worker->>SMTP: 이메일 발송 요청
+        activate SMTP
+        SMTP-->>Worker: 발송 성공
+        deactivate SMTP
+
+        alt 발송 실패
+            Worker->>Queue: 재시도 큐에 재등록
+            Note over Worker,Queue: 최대 3회 재시도 후<br/>Dead Letter Queue로 이동
+        end
+        deactivate Worker
+    end
+        </pre>
+    </div>
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>

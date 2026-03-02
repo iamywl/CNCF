@@ -1,0 +1,219 @@
+{
+	"info": {
+		"_postman_id": "edu-ecommerce-api",
+		"name": "E-Commerce API",
+		"description": "E-Commerce API Postman Collection\n\n이 Collection은 상품, 주문, 인증 API의 테스트를 포함합니다.\nPostman에서 Import하거나 Newman CLI로 실행할 수 있습니다.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "{{base_url}}"
+		}
+	],
+	"item": [
+		{
+			"name": "Auth",
+			"description": "인증 관련 API",
+			"item": [
+				{
+					"name": "로그인",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"// 상태 코드 검증",
+									"pm.test('상태 코드 200', function() {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"// 토큰 존재 검증",
+									"pm.test('accessToken 존재', function() {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('accessToken');",
+									"    pm.expect(json.accessToken).to.be.a('string');",
+									"    // 토큰을 환경 변수에 저장 (이후 요청에서 사용)",
+									"    pm.environment.set('access_token', json.accessToken);",
+									"});",
+									"",
+									"// 응답 시간 검증",
+									"pm.test('응답 시간 1초 이하', function() {",
+									"    pm.expect(pm.response.responseTime).to.be.below(1000);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"user@example.com\",\n    \"password\": \"Str0ng!Pass\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/login",
+							"host": ["{{base_url}}"],
+							"path": ["api", "auth", "login"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Products",
+			"description": "상품 관리 API",
+			"item": [
+				{
+					"name": "상품 목록 조회",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('상태 코드 200', function() {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test('응답이 배열', function() {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.be.an('array');",
+									"});",
+									"",
+									"pm.test('상품에 필수 필드 존재', function() {",
+									"    const json = pm.response.json();",
+									"    if (json.length > 0) {",
+									"        pm.expect(json[0]).to.have.property('id');",
+									"        pm.expect(json[0]).to.have.property('name');",
+									"        pm.expect(json[0]).to.have.property('price');",
+									"    }",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/products",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products"]
+						}
+					}
+				},
+				{
+					"name": "상품 상세 조회",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('상태 코드 200', function() {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test('상품 ID 일치', function() {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.id).to.eql(1);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/products/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products", "1"]
+						}
+					}
+				},
+				{
+					"name": "새 상품 등록",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('상태 코드 201', function() {",
+									"    pm.response.to.have.status(201);",
+									"});",
+									"",
+									"pm.test('등록된 상품 ID 존재', function() {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('id');",
+									"    pm.expect(json.name).to.eql('Galaxy S24');",
+									"    // 다음 테스트에서 사용하기 위해 저장",
+									"    pm.environment.set('created_product_id', json.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{access_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Galaxy S24\",\n    \"price\": 1350000,\n    \"stock\": 100,\n    \"category\": \"전자제품\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/products",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products"]
+						}
+					}
+				},
+				{
+					"name": "존재하지 않는 상품 조회 (404 테스트)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('상태 코드 404', function() {",
+									"    pm.response.to.have.status(404);",
+									"});",
+									"",
+									"pm.test('에러 메시지 존재', function() {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('error');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/products/99999",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products", "99999"]
+						}
+					}
+				}
+			]
+		}
+	]
+}

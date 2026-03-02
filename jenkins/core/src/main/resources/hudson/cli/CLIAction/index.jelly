@@ -1,0 +1,83 @@
+<!--
+The MIT License
+
+Copyright (c) 2004-2009, Sun Microsystems, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+-->
+
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:d="jelly:define" xmlns:l="/lib/layout" xmlns:t="/lib/hudson" xmlns:f="/lib/form" xmlns:i="jelly:fmt">
+  <j:set var="header">
+    <l:view>
+      <l:app-bar title="${it.displayName}">
+        <t:help href="https://www.jenkins.io/redirect/cli" />
+      </l:app-bar>
+
+      <div class="jenkins-page-description">
+        ${%description}
+      </div>
+    </l:view>
+  </j:set>
+
+  <l:settings-subpage header="${header}" permission="${app.READ}">
+    <!-- no need for additional breadcrumb here as we're on an index page already including breadcrumb -->
+      <f:section title="${%Getting started}">
+        <ol class="jenkins-instructions">
+          <li>
+            <div class="jenkins-instructions__label">
+              ${%instruction1}
+            </div>
+            <a class="jenkins-button jenkins-button--primary" href="${rootURL}/jnlpJars/jenkins-cli.jar">
+              <l:icon src="symbol-download" />
+              jenkins-cli.jar
+            </a>
+          </li>
+          <li>
+            <p class="jenkins-instructions__label">
+              ${%instruction2}
+            </p>
+            <j:set var="commandArgs" value="help"/>
+            <st:include page="example.jelly"/>
+          </li>
+        </ol>
+      </f:section>
+
+      <f:section title="${%Available Commands}">
+        <table class="jenkins-table sortable">
+          <thead>
+            <tr>
+              <th initialSortDir="down">${%Name}</th>
+              <th>${%Description}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <j:forEach items="${h.getCLICommands()}" var="command">
+              <tr>
+                <td>
+                  <a href="command/${command.name}" class="jenkins-table__link">${command.name}</a>
+                </td>
+                <td>${command.shortDescription}</td>
+              </tr>
+            </j:forEach>
+          </tbody>
+        </table>
+      </f:section>
+  </l:settings-subpage>
+</j:jelly>
