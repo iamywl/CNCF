@@ -1,6 +1,6 @@
 # EDU 프로젝트 작업 현황
 
-> 최종 업데이트: 2026-03-05
+> 최종 업데이트: 2026-03-07 (kafka 완료)
 
 ---
 
@@ -10,7 +10,7 @@
 
 ---
 
-## 작업 순서 (14개)
+## 작업 순서 (16개)
 
 | 순서 | 프로젝트 | EDU 디렉토리 | 소스 언어 | 상태 |
 |------|----------|-------------|----------|------|
@@ -22,14 +22,16 @@
 | 6 | grpc-go | grpc-go_EDU | Go | **완료** (기본7 + 심화12 + PoC16) |
 | 7 | tart | tart_EDU | Swift | **완료** (기본7 + 심화12 + PoC16) |
 | 8 | helm | helm_EDU | Go | **완료** (기본7 + 심화12 + PoC16) |
-| 9 | terraform | terraform_EDU | Go | 미시작 |
-| 10 | alertmanager | alertmanager_EDU | Go | 미시작 |
+| 9 | terraform | terraform_EDU | Go | **완료** (기본7 + 심화12 + PoC16) |
+| 10 | alertmanager | alertmanager_EDU | Go | **완료** (기본7 + 심화12 + PoC16) |
 | 11 | hubble | hubble_EDU | Go | **완료** (기본7 + 심화12 + PoC16) |
-| 12 | kafka | kafka_EDU | Java/Scala | 미시작 |
-| 13 | grafana | grafana_EDU | Go/TS | 미시작 |
-| 14 | loki | loki_EDU | Go | 미시작 |
+| 12 | kafka | kafka_EDU | Java/Scala | **완료** (기본7 + 심화12 + PoC16) |
+| 13 | grafana | grafana_EDU | Go/TS | **완료** (기본7 + 심화12 + PoC18) |
+| 14 | loki | loki_EDU | Go | **완료** (기본7 + 심화12 + PoC18) |
+| 15 | jaeger | jaeger_EDU | Go | **완료** (기본7 + 심화12 + PoC16) |
+| 16 | istio | istio_EDU | Go | **완료** (기본7 + 심화12 + PoC16) |
 
-> 1~7: 사용자 지정 순서, 8~14: 자율 배정
+> 1~7: 사용자 지정 순서, 8~14: 자율 배정, 16: 긴급 우선
 
 ---
 

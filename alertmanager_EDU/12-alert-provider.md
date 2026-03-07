@@ -1,0 +1,407 @@
+# Alertmanager Alert Provider Deep Dive
+
+## 1. 개요
+
+Alert Provider는 Alert의 저장, 조회, 구독을 담당하는 추상 계층이다. 현재 유일한 구현은 메모리 기반(`provider/mem`)이며, 내부적으로 `store.Alerts`를 사용한다.
+
+## 2. Provider 인터페이스
+
+```go
+// provider/provider.go
+type Alert struct {
+    Header map[string]string   // 메타데이터 (tracing 정보)
+    Data   *types.Alert        // 실제 Alert
+}
+
+type Iterator interface {
+    Err() error
+    Close()
+}
+
+type AlertIterator interface {
+    Iterator
+    Next() <-chan *Alert       // Alert 스트림 채널
+}
+
+type Alerts interface {
+    Subscribe(name string) AlertIterator
+    SlurpAndSubscribe(name string) ([]*types.Alert, AlertIterator)
+    GetPending() AlertIterator
+}
+```
+
+### 2.1 Subscribe vs SlurpAndSubscribe
+
+| 메서드 | 반환 | 용도 |
+|--------|------|------|
+| `Subscribe` | Iterator만 | 실시간 스트림만 필요 (Inhibitor) |
+| `SlurpAndSubscribe` | 초기 Alert + Iterator | 기존 + 실시간 모두 필요 (Dispatcher) |
+| `GetPending` | Iterator | 현재 스냅샷 (API) |
+
+`SlurpAndSubscribe`는 Dispatcher가 시작할 때 기존 Alert를 놓치지 않도록 보장한다.
+
+## 3. 메모리 구현 (mem.Alerts)
+
+### 3.1 구조체
+
+```go
+// provider/mem/mem.go
+type Alerts struct {
+    cancel  context.CancelFunc
+
+    mtx       sync.Mutex
+    alerts    *store.Alerts              // 실제 Alert 저장소
+    marker    types.AlertMarker          // Alert 상태 추적
+    listeners map[int]listeningAlerts    // 구독자 맵
+    next      int                        // 다음 구독자 ID
+
+    callback   AlertStoreCallback        // PreStore/PostStore 콜백
+    logger     *slog.Logger
+    propagator propagation.TextMapPropagator
+    flagger    featurecontrol.Flagger
+
+    // 메트릭
+    alertsLimit        prometheus.Gauge
+    alertsLimitedTotal *prometheus.CounterVec
+}
+```
+
+### 3.2 AlertStoreCallback
+
+```go
+// provider/mem/mem.go
+type AlertStoreCallback interface {
+    PreStore(alert *types.Alert, existing bool) error
+    PostStore(alert *types.Alert, existing bool)
+    PostDelete(alert *types.Alert)
+    PostGC(fingerprints model.Fingerprints)
+}
+```
+
+| 콜백 | 호출 시점 | 역할 |
+|------|----------|------|
+| `PreStore` | Alert 저장 전 | 유효성 검증, 제한 확인 |
+| `PostStore` | Alert 저장 후 | 메트릭 업데이트 |
+| `PostDelete` | Alert 삭제 후 | 정리 작업 |
+| `PostGC` | GC 후 | Marker 정리 |
+
+### 3.3 생성
+
+```go
+// provider/mem/mem.go
+func NewAlerts(
+    ctx context.Context,
+    m types.AlertMarker,
+    intervalGC time.Duration,
+    perAlertNameLimit int,
+    alertCallback AlertStoreCallback,
+    l *slog.Logger,
+    r prometheus.Registerer,
+    flagger featurecontrol.Flagger,
+) (*Alerts, error)
+```
+
+```
+NewAlerts() 흐름:
+    1. store.Alerts 생성 (내부 map)
+    2. perAlertNameLimit 설정 (Alert 이름별 제한)
+    3. GC 루프 시작 (goroutine)
+    4. 콜백 등록
+```
+
+## 4. Put() — Alert 저장
+
+```
+Alerts.Put(alerts ...*types.Alert):
+    각 Alert에 대해:
+    1. Fingerprint 계산 (Labels 해시)
+    2. 기존 Alert 존재 확인
+
+    3. PreStore 콜백 호출
+       - existing=true/false
+       - 에러 반환 시 건너뜀
+
+    4. 기존 Alert 있으면:
+       - StartsAt: 기존 값 유지 (더 이르면)
+       - EndsAt: 새 값 사용
+       - Annotations: 새 값 사용
+       - UpdatedAt: now
+
+    5. store.Alerts.Set(alert)
+       - map[fp] = alert
+       - limit.Bucket 업데이트
+
+    6. PostStore 콜백 호출
+
+    7. 리스너들에게 브로드캐스트
+       - 각 구독자 채널에 Alert 전송
+```
+
+## 5. 구독 모델
+
+### 5.1 구독자 등록
+
+```go
+// provider/mem/mem.go
+type listeningAlerts struct {
+    alerts chan *provider.Alert
+    done   chan struct{}
+}
+```
+
+```
+Subscribe(name):
+    1. listeningAlerts 생성 (버퍼 채널)
+    2. listeners[next] = listeningAlerts
+    3. next++
+    4. AlertIterator 반환
+```
+
+### 5.2 브로드캐스트
+
+```
+Put() 내부:
+    for _, l := range a.listeners {
+        select {
+        case l.alerts <- &provider.Alert{
+            Header: tracing 정보,
+            Data:   alert,
+        }:
+        case <-l.done:
+            // 구독자가 종료됨
+        default:
+            // 채널이 가득 참 → 건너뜀 (비차단)
+        }
+    }
+```
+
+**중요**: 채널이 가득 차면 Alert가 드롭된다. 이는 느린 소비자가 전체 시스템을 차단하지 않도록 하기 위함이다.
+
+### 5.3 SlurpAndSubscribe
+
+```
+SlurpAndSubscribe(name):
+    a.mtx.Lock()
+    1. Subscribe() → Iterator 생성
+    2. alerts.List() → 현재 모든 Alert 스냅샷
+    a.mtx.Unlock()
+
+    반환: (스냅샷, Iterator)
+```
+
+Lock 안에서 구독과 스냅샷을 동시에 수행하여, 스냅샷 이후의 Alert만 Iterator에서 수신되도록 보장한다.
+
+## 6. store.Alerts (내부 저장소)
+
+### 6.1 구조체
+
+```go
+// store/store.go
+type Alerts struct {
+    sync.Mutex
+    alerts        map[model.Fingerprint]*types.Alert  // 핵심 저장소
+    gcCallback    func([]*types.Alert)                // GC 콜백
+    limits        map[string]*limit.Bucket[model.Fingerprint]  // 이름별 제한
+    perAlertLimit int
+    destroyed     bool
+}
+```
+
+### 6.2 핵심 메서드
+
+```go
+func NewAlerts() *Alerts
+func (a *Alerts) WithPerAlertLimit(lim int) *Alerts
+func (a *Alerts) SetGCCallback(cb func([]*types.Alert))
+func (a *Alerts) Run(ctx context.Context, interval time.Duration)
+
+func (a *Alerts) Set(alert *types.Alert) error   // 추가/업데이트
+func (a *Alerts) Get(fp model.Fingerprint) (*types.Alert, error)
+func (a *Alerts) Delete(alert *types.Alert) error
+func (a *Alerts) List() []*types.Alert            // 전체 목록
+func (a *Alerts) Empty() bool
+func (a *Alerts) Len() int
+
+func (a *Alerts) GC() (deleted []*types.Alert)    // 만료 Alert 삭제
+```
+
+### 6.3 Set() 동작
+
+```
+store.Alerts.Set(alert):
+    fp := alert.Fingerprint()
+
+    if perAlertLimit > 0:
+        alertName := alert.Labels["alertname"]
+        bucket := limits[alertName]
+        if bucket == nil:
+            bucket = limit.NewBucket(perAlertLimit)
+            limits[alertName] = bucket
+        if !bucket.Upsert(fp, alert.ResolvedAt()):
+            return ErrLimited  // 제한 초과
+
+    alerts[fp] = alert
+    return nil
+```
+
+## 7. limit.Bucket (용량 제한)
+
+### 7.1 구조체
+
+```go
+// limit/bucket.go
+type Bucket[V comparable] struct {
+    mtx      sync.Mutex
+    index    map[V]*item[V]          // 빠른 조회
+    items    sortedItems[V]          // 힙 정렬 (만료 시간 기준)
+    capacity int
+}
+
+type item[V any] struct {
+    value    V
+    priority time.Time              // 만료 시간
+    index    int                    // 힙 인덱스
+}
+```
+
+### 7.2 Upsert() 동작
+
+```
+Bucket.Upsert(value, priority):
+    if value가 이미 존재:
+        priority 업데이트 (힙 재정렬)
+        return true
+
+    if len(items) < capacity:
+        새 item 추가
+        return true
+
+    // 용량 초과
+    oldest := items[0]  // 힙의 루트 (가장 오래된 항목)
+    if oldest.expired(now):
+        oldest 제거, 새 item 추가
+        return true
+
+    return false  // 제한 초과, 추가 실패
+```
+
+힙을 사용하여 가장 오래된 항목을 O(log n)으로 찾고, 만료된 항목이 있으면 교체한다.
+
+## 8. GC (Garbage Collection)
+
+### 8.1 gcAlerts()
+
+```
+store.Alerts.gcAlerts():
+    now := time.Now()
+    var deleted []*types.Alert
+
+    for fp, alert := range alerts:
+        if alert.Resolved() && alert.ResolvedAt().Before(now):
+            delete(alerts, fp)
+            deleted = append(deleted, alert)
+
+    return deleted
+```
+
+### 8.2 gcLimitBuckets()
+
+```
+store.Alerts.gcLimitBuckets():
+    for name, bucket := range limits:
+        if bucket.IsStale():
+            delete(limits, name)  // 모든 항목이 만료된 Bucket 제거
+```
+
+### 8.3 Provider GC 루프
+
+```
+mem.Alerts GC goroutine:
+    ticker := time.NewTicker(intervalGC)
+    for {
+        select {
+        case <-ticker.C:
+            1. store.Alerts.GC() → 만료 Alert 삭제
+            2. gcCallback(deleted) → Provider 수준 정리
+            3. PostGC 콜백 → Marker.Delete(fps)
+        case <-ctx.Done():
+            return
+        }
+    }
+```
+
+## 9. Alert 생명주기 (Provider 관점)
+
+```
+API POST /api/v2/alerts
+    │
+    ▼
+mem.Alerts.Put(alert)
+    │
+    ├─ PreStore → 유효성 검증
+    │
+    ├─ store.Set(alert)
+    │   └─ map[fp] = alert
+    │
+    ├─ PostStore
+    │
+    └─ 리스너 브로드캐스트
+        ├─ Dispatcher (routeAlert)
+        └─ Inhibitor (scache 업데이트)
+
+    ...시간 경과...
+
+GC Tick
+    │
+    ▼
+store.GC()
+    │
+    ├─ Resolved Alert 삭제
+    │
+    └─ PostGC
+        └─ Marker.Delete(fps) → 상태 정리
+```
+
+## 10. 에러 타입
+
+```go
+// store/store.go
+var (
+    ErrLimited   = errors.New("alert limited")    // 제한 초과
+    ErrNotFound  = errors.New("alert not found")  // 없는 Alert
+    ErrDestroyed = errors.New("alert store destroyed")  // 저장소 파괴됨
+)
+```
+
+## 11. 메트릭
+
+| 메트릭 | 타입 | 설명 |
+|--------|------|------|
+| `alertmanager_alerts` | Gauge | 현재 Alert 수 |
+| `alertmanager_alerts_received_total` | Counter | 수신 Alert 총 수 |
+| `alertmanager_alerts_invalid_total` | Counter | 유효하지 않은 Alert 수 |
+| `alertmanager_alerts_limit` | Gauge | Alert 제한 (설정된 경우) |
+| `alertmanager_alerts_limited_total` | Counter (alertname 레이블) | 제한 초과로 거부된 Alert 수 |
+
+## 12. 동시성 모델
+
+```
+┌─────────────────────────────────────┐
+│  mem.Alerts                         │
+│                                     │
+│  [sync.Mutex] mtx                   │
+│    Put(), Subscribe(), GC() 보호    │
+│                                     │
+│  store.Alerts                       │
+│  [sync.Mutex] 내장                  │
+│    Set(), Get(), GC() 보호          │
+│                                     │
+│  limit.Bucket                       │
+│  [sync.Mutex] mtx                   │
+│    Upsert(), IsStale() 보호         │
+│                                     │
+│  리스너 채널:                        │
+│    select + default로 비차단 전송    │
+│    → 느린 소비자 영향 최소화         │
+└─────────────────────────────────────┘
+```
