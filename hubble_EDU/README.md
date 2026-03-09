@@ -102,7 +102,7 @@
 | [05-core-components.md](./05-core-components.md) | 핵심 컴포넌트 | Observer, Parser, Ring Buffer, Filter, Relay, Peer Manager |
 | [06-operations.md](./06-operations.md) | 운영 | 설치, CLI 설정, TLS, 모니터링, 트러블슈팅 |
 
-### 심화 문서 (07-18)
+### 심화 문서 (07-19)
 
 | 문서 | 주제 |
 |------|------|
@@ -118,6 +118,7 @@
 | [16-exporter-system.md](./16-exporter-system.md) | 익스포터 시스템 (Export 파이프라인, 동적 설정, 파일 로테이션) |
 | [17-printer-output.md](./17-printer-output.md) | 프린터/출력 포맷 (compact, dict, jsonpb, table, 색상 코딩) |
 | [18-hive-integration.md](./18-hive-integration.md) | Hive Cell 통합 (DI, Job Group, Config, Monitor Consumer) |
+| [19-field-mask.md](./19-field-mask.md) | Field Mask (선택적 필드 필터링, 대역폭 절감, 경로 검증) |
 
 ### PoC 목록
 
@@ -139,6 +140,7 @@
 | [poc-14-namespace-manager](./poc-14-namespace-manager/) | Namespace Manager | 네임스페이스 추적 및 정렬 |
 | [poc-15-lost-event-handler](./poc-15-lost-event-handler/) | Lost Event 처리 | 유실 이벤트 감지, rate-limiting, 보고 |
 | [poc-16-priority-queue](./poc-16-priority-queue/) | Priority Queue | 타임스탬프 기반 min-heap 정렬 |
+| [poc-17-field-mask](./poc-17-field-mask/) | Field Mask | 선택적 필드 필터링, 경로 트리, 대역폭 절감 |
 
 ---
 
@@ -151,5 +153,5 @@
 5. **04-code-structure.md** - 소스코드 디렉토리와 빌드 시스템 파악
 6. **05-core-components.md** - 핵심 컴포넌트 동작 원리 심화
 7. **06-operations.md** - 설치, 설정, 운영 실무
-8. **심화 문서 (07-18)** - 관심 서브시스템별 deep-dive
-9. **PoC (poc-01~16)** - 핵심 알고리즘 직접 구현 및 실행
+8. **심화 문서 (07-19)** - 관심 서브시스템별 deep-dive
+9. **PoC (poc-01~17)** - 핵심 알고리즘 직접 구현 및 실행
