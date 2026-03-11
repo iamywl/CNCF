@@ -727,10 +727,19 @@ func (e *Evaluator) parseArgs(argsStr string) ([]string, error) {
 
 	var args []string
 	depth := 0
+	inQuote := false
 	start := 0
 
 	for i := 0; i < len(argsStr); i++ {
-		switch argsStr[i] {
+		ch := argsStr[i]
+		if ch == '"' && (i == 0 || argsStr[i-1] != '\\') {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		switch ch {
 		case '(':
 			depth++
 		case ')':

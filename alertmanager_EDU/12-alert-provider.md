@@ -405,3 +405,222 @@ var (
 │    → 느린 소비자 영향 최소화         │
 └─────────────────────────────────────┘
 ```
+
+## 13. OpenTelemetry 추적
+
+### 13.1 tracer 초기화
+
+```go
+// provider/mem/mem.go
+var tracer = otel.Tracer("github.com/prometheus/alertmanager/provider/mem")
+```
+
+### 13.2 Put()에서의 추적 전파
+
+```go
+// Put() 내부에서 tracing 정보를 Alert Header에 주입
+func (a *Alerts) Put(alerts ...*types.Alert) error {
+    for _, alert := range alerts {
+        // tracing context를 Header로 전파
+        carrier := make(propagation.HeaderCarrier)
+        a.propagator.Inject(ctx, carrier)
+
+        providerAlert := &provider.Alert{
+            Header: carrier,    // tracing 정보 포함
+            Data:   alert,
+        }
+        // 리스너에게 전달 시 Header도 함께 전달
+    }
+}
+```
+
+**왜 Header에 tracing 정보를 주입하는가?** API로 수신된 Alert가 Dispatcher → Pipeline → Integration으로 전달될 때, 원래 API 요청의 trace context를 유지해야 end-to-end 추적이 가능하다. `propagation.HeaderCarrier`를 통해 context를 직렬화하여 Alert과 함께 전달한다.
+
+## 14. alertChannelLength과 드롭 정책
+
+```go
+// provider/mem/mem.go
+const alertChannelLength = 200
+```
+
+구독자 채널의 버퍼 크기는 200이다. Put()에서 리스너에게 Alert를 전송할 때:
+
+```go
+select {
+case l.alerts <- providerAlert:
+    // 전송 성공
+case <-l.done:
+    // 구독자 종료
+default:
+    // 채널 가득 참 → 드롭
+}
+```
+
+**왜 드롭 정책인가?** 대안은 다음과 같다:
+
+| 정책 | 장점 | 단점 |
+|------|------|------|
+| 차단 (blocking) | Alert 손실 없음 | 느린 소비자가 전체 시스템 차단 |
+| 드롭 (current) | 시스템 안정성 유지 | 일부 Alert 손실 가능 |
+| 무한 버퍼 | 손실 없고 차단 없음 | 메모리 폭발 위험 |
+
+Alertmanager는 고가용성 시스템이므로, 전체 시스템 안정성이 개별 Alert 보장보다 우선한다. 드롭된 Alert는 다음 Prometheus scrape에서 다시 수신되므로, 영구 손실이 아니다.
+
+### 14.1 subscriberChannelWrites 메트릭
+
+```go
+// provider/mem/mem.go
+a.subscriberChannelWrites = promauto.With(r).NewCounterVec(
+    prometheus.CounterOpts{
+        Name: "alertmanager_alerts_subscriber_channel_writes_total",
+        Help: "Total number of write attempts to subscriber channels.",
+    },
+    []string{"subscriber", "result"},  // result: "success" or "dropped"
+)
+```
+
+이 메트릭으로 채널 드롭 빈도를 모니터링할 수 있다. `result="dropped"`가 증가하면 소비자가 처리 속도를 따라가지 못하는 것이므로, 시스템 스케일링이 필요하다.
+
+## 15. Feature Control 플래그
+
+```go
+// provider/mem/mem.go
+type Alerts struct {
+    // ...
+    flagger featurecontrol.Flagger
+}
+
+func (a *Alerts) registerMetrics(r prometheus.Registerer) {
+    labels := []string{}
+    if a.flagger.EnableAlertNamesInMetrics() {
+        labels = append(labels, "alertname")
+    }
+    a.alertsLimitedTotal = promauto.With(r).NewCounterVec(
+        prometheus.CounterOpts{
+            Name: "alertmanager_alerts_limited_total",
+        },
+        labels,
+    )
+}
+```
+
+**왜 alertname 레이블이 선택적인가?** Alert 이름의 카디널리티가 높으면(수백 개 이상) Prometheus 메트릭의 시계열 수가 폭발할 수 있다. `EnableAlertNamesInMetrics` 플래그로 이를 제어하여, 필요한 환경에서만 활성화한다.
+
+## 16. perAlertNameLimit 동작 원리
+
+```
+Alert 이름별 제한 흐름:
+
+PUT alertname="HighCPU", instance="node-1"
+  → bucket["HighCPU"].Upsert(fp1, resolvedAt)
+  → 용량 미만 → 성공
+
+PUT alertname="HighCPU", instance="node-2"
+  → bucket["HighCPU"].Upsert(fp2, resolvedAt)
+  → 용량 미만 → 성공
+
+PUT alertname="HighCPU", instance="node-3"
+  → bucket["HighCPU"].Upsert(fp3, resolvedAt)
+  → 용량 == capacity
+
+PUT alertname="HighCPU", instance="node-4"
+  → bucket["HighCPU"].Upsert(fp4, resolvedAt)
+  → 용량 초과
+  → 힙에서 가장 오래된 항목 확인
+  → 만료됨 → 교체 성공
+  → 만료 안 됨 → ErrLimited 반환
+
+핵심: 만료된 Alert를 자동으로 교체하여
+      resolved Alert가 공간을 차지하지 않도록 한다.
+```
+
+## 17. 성능 고려사항
+
+### 17.1 Put() 성능
+
+```
+Put() 비용 분석:
+
+단일 Alert Put:
+  1. Fingerprint 계산: O(L) where L = 레이블 수
+  2. 기존 Alert 조회: O(1) (해시맵)
+  3. PreStore 콜백: O(1)
+  4. store.Set: O(1) (해시맵) + O(log N) (힙, limit 사용 시)
+  5. PostStore 콜백: O(1)
+  6. 리스너 브로드캐스트: O(S) where S = 구독자 수
+
+배치 Put (N alerts):
+  → O(N × (L + log M + S))
+  where M = 현재 Alert 수, S = 구독자 수
+```
+
+### 17.2 GC 성능
+
+```
+GC() 비용:
+  gcAlerts: O(N) — 전체 Alert 순회
+  gcLimitBuckets: O(B) — 전체 Bucket 순회
+
+GC 주기 최적화:
+  - intervalGC이 너무 짧으면: 불필요한 CPU 사용
+  - intervalGC이 너무 길면: 만료 Alert가 메모리에 오래 존재
+  - 기본값은 적절한 균형을 유지
+```
+
+### 17.3 SlurpAndSubscribe의 Lock 비용
+
+```go
+func (a *Alerts) SlurpAndSubscribe(name string) ([]*types.Alert, AlertIterator) {
+    a.mtx.Lock()
+    iter := a.Subscribe(name)
+    alerts := a.alerts.List()  // 전체 Alert 복사
+    a.mtx.Unlock()
+    return alerts, iter
+}
+```
+
+Lock 내에서 전체 Alert를 List()로 복사한다. Alert 수가 수만 개이면 Lock 유지 시간이 길어져 다른 Put() 호출이 대기하게 된다. 그러나 이 메서드는 Dispatcher 시작 시에만 호출되므로, 정상 운영 중에는 영향이 없다.
+
+## 18. 테스트 전략
+
+### 18.1 AlertStoreCallback Mock
+
+```go
+type fakeCallback struct {
+    preStoreErr error
+    preStoreCalls int
+    postStoreCalls int
+    postDeleteCalls int
+    postGCCalls int
+}
+
+func (f *fakeCallback) PreStore(alert *types.Alert, existing bool) error {
+    f.preStoreCalls++
+    return f.preStoreErr
+}
+```
+
+### 18.2 핵심 테스트 시나리오
+
+```
+1. Put + Get 왕복
+   - Alert 저장 후 Fingerprint로 조회 → 일치 확인
+
+2. 구독 + 브로드캐스트
+   - Subscribe → Put → 채널에서 Alert 수신 확인
+
+3. SlurpAndSubscribe 원자성
+   - 기존 Alert 존재 → SlurpAndSubscribe
+   - 스냅샷에 기존 Alert 포함 + 이후 Alert만 Iterator에서 수신
+
+4. 채널 드롭
+   - 채널 버퍼 가득 참 → Put → 드롭 확인 (차단 안 됨)
+
+5. GC
+   - resolved Alert 생성 → GC → 삭제 확인
+   - PostGC 콜백에서 Fingerprint 전달 확인
+
+6. perAlertNameLimit
+   - limit 설정 → limit+1번째 Alert → ErrLimited 확인
+   - resolved Alert → GC → 새 Alert 저장 가능
+```

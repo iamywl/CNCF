@@ -395,3 +395,256 @@ amtool silence query
 # 특정 Silence의 매칭 Alert 확인
 curl http://localhost:9093/api/v2/alerts?filter=alertname="HighCPU"&silenced=true
 ```
+
+## 14. matcherIndex 소스 코드 상세
+
+### 14.1 matcherIndex 타입
+
+```go
+// silence/silence.go
+type matcherIndex map[string]labels.MatcherSet
+```
+
+키는 Silence ID(ULID), 값은 컴파일된 MatcherSet이다.
+
+### 14.2 add 메서드
+
+```go
+// silence/silence.go
+func (c matcherIndex) add(s *pb.Silence) (labels.MatcherSet, error) {
+    matcherSet := make(labels.MatcherSet, 0, len(s.MatcherSets))
+
+    for _, ms := range s.MatcherSets {
+        matchers := make(labels.Matchers, len(ms.Matchers))
+        for i, m := range ms.Matchers {
+            var mt labels.MatchType
+            switch m.Type {
+            case pb.Matcher_EQUAL:
+                mt = labels.MatchEqual
+            case pb.Matcher_NOT_EQUAL:
+                mt = labels.MatchNotEqual
+            case pb.Matcher_REGEXP:
+                mt = labels.MatchRegexp
+            case pb.Matcher_NOT_REGEXP:
+                mt = labels.MatchNotRegexp
+            default:
+                return nil, fmt.Errorf("unknown matcher type %q", m.Type)
+            }
+            matcher, err := labels.NewMatcher(mt, m.Name, m.Pattern)
+            if err != nil {
+                return nil, err
+            }
+            matchers[i] = matcher
+        }
+        matcherSet = append(matcherSet, &matchers)
+    }
+
+    c[s.Id] = matcherSet
+    return matcherSet, nil
+}
+```
+
+**왜 Protobuf Matcher를 labels.Matcher로 변환하는가?** Protobuf 메시지는 직렬화/역직렬화에 적합하지만, 매칭 로직(특히 정규식 컴파일)은 `labels.Matcher`에 구현되어 있다. `add()`에서 정규식이 컴파일되어 캐시되므로, 매칭 시마다 재컴파일하지 않는다.
+
+### 14.3 get 메서드
+
+```go
+func (c matcherIndex) get(s *pb.Silence) (labels.MatcherSet, error) {
+    if m, ok := c[s.Id]; ok {
+        return m, nil
+    }
+    return nil, ErrNotFound
+}
+```
+
+## 15. OpenTelemetry 추적
+
+```go
+// silence/silence.go
+var tracer = otel.Tracer("github.com/prometheus/alertmanager/silence")
+```
+
+Silence 저장소는 OpenTelemetry 추적을 지원한다. `Set()`, `Expire()`, `Query()` 등 주요 메서드에서 span을 생성하여 분산 추적을 제공한다:
+
+```
+Silence 추적 계층:
+
+API Request (HTTP span)
+  └─ Silences.Set() (silence span)
+       ├─ attribute: silence.id
+       ├─ attribute: silence.matchers
+       └─ broadcast → Cluster Channel
+            └─ delegate.NotifyMsg()
+                 └─ Silences.Merge()
+```
+
+## 16. 에러 타입과 처리
+
+```go
+// silence/silence.go
+var ErrNotFound = errors.New("silence not found")
+var ErrInvalidState = errors.New("invalid state")
+```
+
+### 16.1 Set() 에러 시나리오
+
+```
+Set() 에러 분류:
+
+1. 유효성 검증 실패
+   ├─ Matchers가 0개 → "at least one matcher required"
+   ├─ StartsAt >= EndsAt → "end time must be after start time"
+   └─ Matcher Name/Value 유효하지 않음
+
+2. Limits 초과
+   ├─ MaxSilences 초과 → "too many silences"
+   └─ MaxSilenceSizeBytes 초과 → "silence too large"
+
+3. 업데이트 시
+   ├─ 기존 Silence 미발견 → ErrNotFound
+   └─ 이미 만료된 Silence 수정 시도 → ErrInvalidState
+
+4. 내부 오류
+   └─ matcherIndex.add() 실패 → 정규식 컴파일 에러
+```
+
+### 16.2 Expire() 에러 시나리오
+
+```
+Expire() 에러 분류:
+  ├─ Silence 미발견 → ErrNotFound
+  ├─ 이미 만료됨 → 건너뜀 (에러가 아님)
+  └─ 직렬화 실패 → Protobuf 에러
+```
+
+## 17. 클러스터 Merge 상세
+
+### 17.1 CRDT Merge 규칙
+
+```
+Silences.Merge(entries):
+    각 entry에 대해:
+
+    1. 기존 st에 해당 ID 없음
+       → 새로 추가
+       → matcherIndex.add()
+       → version++
+
+    2. 기존 st에 해당 ID 있음
+       → 수신 entry의 UpdatedAt > 기존 UpdatedAt
+          → 수신 entry로 교체
+          → matcherIndex 업데이트
+          → version++
+       → 수신 entry의 UpdatedAt <= 기존 UpdatedAt
+          → 무시 (기존이 더 최신)
+
+    CRDT 속성:
+    - 교환 법칙: Merge(A, B) == Merge(B, A)
+    - 결합 법칙: Merge(Merge(A, B), C) == Merge(A, Merge(B, C))
+    - 멱등성: Merge(A, A) == A
+```
+
+### 17.2 version과 캐시 무효화
+
+```
+Set/Expire/Merge 시:
+    version++
+         ↓
+    다음 Silencer.Mutes() 호출:
+         ↓
+    cache.Get(fp, currentVersion)
+         ↓
+    cacheEntry.version != currentVersion
+         ↓
+    캐시 미스 → 전체 매칭 재수행
+         ↓
+    cache.Set(fp, currentVersion, silenceIDs)
+```
+
+**왜 글로벌 version을 사용하는가?** 개별 Silence의 변경을 추적하는 대신, 전체 상태의 version을 하나 증가시킨다. 이 방식은 단순하지만, 하나의 Silence만 변경되어도 모든 캐시가 점진적으로 재계산된다. 그러나 lazy invalidation으로 인해 실제 Mutes() 호출이 있는 Alert에 대해서만 재계산되므로, 실전에서는 효율적이다.
+
+## 18. 성능 고려사항
+
+### 18.1 매칭 성능
+
+```
+Silencer.Mutes() 성능:
+
+최선: O(1) — 캐시 히트
+  → fp로 cacheEntry 조회 → version 일치 → 즉시 반환
+
+최악: O(S × M) — 캐시 미스
+  → S = 활성 Silence 수
+  → M = 평균 Matcher 수
+  → 모든 활성 Silence와 Alert Labels 매칭
+
+캐시 히트율 최적화:
+  - Silence 변경이 드물면 version이 안정 → 높은 히트율
+  - Alert 수가 많으면 캐시 메모리 사용량 증가
+```
+
+### 18.2 GC 성능
+
+```
+GC() 비용: O(N) where N = 전체 Silence 수
+  - 만료 + retention 경과 확인
+  - 삭제된 Silence의 matcherIndex 엔트리 제거
+  - version 증가
+
+Maintenance 주기 (기본 15분):
+  - GC + Snapshot을 순차 실행
+  - 대규모 Silence 수(수천 개)에서는 Snapshot I/O가 병목
+```
+
+### 18.3 스냅샷 크기 관리
+
+```
+스냅샷 크기 = Σ(각 Silence의 Protobuf 직렬화 크기)
+
+크기 줄이기:
+  - retention을 짧게 설정 → 만료된 Silence 빠르게 삭제
+  - 불필요한 Silence 정리 (amtool silence expire --all)
+  - MaxSilences 제한으로 폭발적 증가 방지
+```
+
+## 19. 테스트 전략
+
+### 19.1 quartz.Clock을 이용한 시간 제어
+
+```go
+// silence/silence.go
+type Silences struct {
+    clock quartz.Clock   // 테스트에서 모의 시계 주입
+    // ...
+}
+```
+
+**왜 quartz.Clock을 사용하는가?** Silence의 활성/만료 상태는 시간에 의존한다. `time.Now()`를 직접 사용하면 테스트가 비결정적이 된다. `quartz.Clock`으로 시간을 제어하여:
+- 특정 시점에 Silence가 활성화되는지 검증
+- GC에서 retention 경과 후 삭제되는지 검증
+- 만료 시점 정확성 검증
+
+### 19.2 핵심 테스트 시나리오
+
+```
+1. Set + Query 왕복 테스트
+   - 생성 후 Query로 조회 → 일치 확인
+
+2. Expire 테스트
+   - Set → Expire → Query(QState("expired")) → 만료 확인
+
+3. GC 테스트
+   - Set → Expire → 시간 경과(retention) → GC() → 삭제 확인
+
+4. Merge 테스트
+   - 두 인스턴스에서 독립적으로 Silence 생성
+   - Merge 후 양쪽 모두 동일한 상태
+
+5. 캐시 테스트
+   - Mutes() → 캐시 히트 확인
+   - Set() → version++ → Mutes() → 캐시 미스 확인
+
+6. Limits 테스트
+   - MaxSilences 초과 시 에러 반환
+   - MaxSilenceSizeBytes 초과 시 에러 반환
+```

@@ -428,4 +428,269 @@ replication.factor = 3
 
 ---
 
+## 11. MirrorHerder — 특화된 DistributedHerder
+
+### 11.1 Herder 생성의 복잡성
+
+```java
+// MirrorMaker.java:addHerder()
+private void addHerder(SourceAndTarget sourceAndTarget) {
+    Map<String, String> workerProps = config.workerConfig(sourceAndTarget);
+    Plugins plugins = new Plugins(workerProps);
+    plugins.compareAndSwapWithDelegatingLoader();
+
+    DistributedConfig distributedConfig = new DistributedConfig(workerProps);
+
+    // 백킹 스토어 생성
+    KafkaOffsetBackingStore offsetBackingStore = ...;
+    StatusBackingStore statusBackingStore = ...;
+    ConfigBackingStore configBackingStore = ...;
+
+    // Worker + Herder 생성
+    Worker worker = new Worker(workerId, time, plugins, distributedConfig, ...);
+    Herder herder = new MirrorHerder(config, sourceAndTarget, ...);
+    herders.put(sourceAndTarget, herder);
+}
+```
+
+**왜 각 복제 페어마다 별도의 백킹 스토어를 생성하는가?**
+
+| 컴포넌트 | 역할 | 격리 이유 |
+|----------|------|----------|
+| OffsetBackingStore | 커넥터 오프셋 저장 | 페어별 독립적인 오프셋 추적 |
+| StatusBackingStore | 태스크 상태 저장 | 한 페어의 장애가 다른 페어에 영향 없음 |
+| ConfigBackingStore | 커넥터 설정 저장 | 페어별 독립적인 설정 관리 |
+
+### 11.2 REST 서버와 내부 통신
+
+```java
+// MirrorMaker 초기화
+if (config.enableInternalRest()) {
+    this.restClient = new RestClient(config);
+    internalServer = new MirrorRestServer(config.originals(), restClient);
+    internalServer.initializeServer();
+    this.advertisedUrl = internalServer.advertisedUrl();
+}
+```
+
+**왜 내부 REST 서버가 필요한가?** DistributedHerder는 Connect 클러스터 내에서 리더 선출과 태스크 재배분을 위해 REST API로 통신한다. MM2의 각 Herder가 별도의 Connect 런타임이므로, 내부 REST 서버를 통해 코디네이션한다.
+
+## 12. OffsetSyncStore 상세
+
+### 12.1 오프셋 매핑 원리
+
+```
+소스 클러스터:  offset 1000 → 레코드 A
+                offset 1001 → 레코드 B (트랜잭션 abort)
+                offset 1002 → 레코드 C
+
+타겟 클러스터:  offset 1000 → 레코드 A
+                              (B는 복제되지 않음 - abort)
+                offset 1001 → 레코드 C
+
+매핑: source offset 1000 → target offset 1000
+      source offset 1002 → target offset 1001
+
+차이 이유: abort된 트랜잭션 레코드는 READ_COMMITTED에서 건너뜀
+```
+
+### 12.2 OffsetSync 토픽
+
+```
+mm2-offset-syncs.<target>.internal
+  Key: topic-partition (예: orders-0)
+  Value: {source_offset, target_offset}
+
+이 토픽은 MirrorSourceTask가 레코드를 복제할 때 주기적으로 업데이트한다.
+CheckpointConnector가 이 데이터를 읽어 컨슈머 그룹 오프셋을 변환한다.
+```
+
+### 12.3 컨슈머 그룹 페일오버 흐름
+
+```
+정상 상태:
+  소스 클러스터: consumer-group-1, topic=orders, offset=1000
+
+페일오버:
+  1. CheckpointConnector가 offset-syncs 토픽에서
+     source offset 1000 → target offset 998 매핑 확인
+  2. 타겟 클러스터의 checkpoints 토픽에 기록:
+     consumer-group-1, topic=primary.orders, offset=998
+  3. 컨슈머가 타겟 클러스터에서 offset 998부터 소비 재개
+
+결과: 최소한의 데이터 중복으로 페일오버 완료
+```
+
+## 13. 에러 처리와 복원력
+
+### 13.1 Scheduler 에러 처리
+
+```java
+// Scheduler에서 주기적 작업 실패 시
+scheduler.scheduleRepeating(this::syncTopicAcls,
+    config.syncTopicAclsInterval(), "syncing topic ACLs");
+
+// syncTopicAcls() 내부에서 예외 발생 시:
+//   → Scheduler가 예외 로깅
+//   → 다음 주기에 재시도
+//   → MM2 프로세스는 계속 실행
+```
+
+**왜 작업 실패가 프로세스를 중단시키지 않는가?** ACL 동기화나 설정 동기화는 보조 기능이다. 이 기능이 일시적으로 실패해도 데이터 복제(MirrorSourceTask)는 독립적으로 계속 동작해야 한다.
+
+### 13.2 MirrorSourceTask 에러 복원
+
+```
+데이터 복제 에러 시나리오:
+
+1. 소스 클러스터 네트워크 단절
+   → 컨슈머 poll() 타임아웃
+   → Connect 프레임워크가 자동 재시도
+   → 복구 후 마지막 오프셋부터 재개
+
+2. 타겟 클러스터 쓰기 실패
+   → 프로듀서 재시도 (Kafka 내장)
+   → max.retries 초과 시 → 태스크 실패 → 재시작
+
+3. 토픽 자동 생성 실패
+   → replication.factor 불만족 등
+   → 에러 로깅, 해당 토픽 복제 건너뜀
+   → 다음 refresh 주기에 재시도
+```
+
+## 14. 순환 감지(Cycle Detection) 상세
+
+### 14.1 isCycle 재귀 추적
+
+```java
+boolean isCycle(String topic) {
+    // 1. 토픽 이름에서 소스 클러스터 추출
+    String source = replicationPolicy.topicSource(topic);
+    if (source == null) {
+        return false;  // 원본 토픽 (prefix 없음)
+    }
+
+    // 2. 소스가 현재 타겟과 같으면 순환
+    if (source.equals(sourceAndTarget.target())) {
+        return true;   // 예: backup.orders를 backup→primary에서 복제하려 함
+    }
+
+    // 3. 상위 토픽으로 재귀 추적
+    String upstreamTopic = replicationPolicy.upstreamTopic(topic);
+    if (upstreamTopic == null || upstreamTopic.equals(topic)) {
+        return false;  // 더 이상 추적 불가
+    }
+    return isCycle(upstreamTopic);
+}
+```
+
+### 14.2 다중 클러스터 순환 예시
+
+```
+3-클러스터 환경: A, B, C
+  A→B: orders → B.orders
+  B→C: orders, B.orders → C.orders, C.B.orders
+  C→A: ???
+
+C→A 복제 시:
+  - orders → A.orders (새 토픽)
+  - C.B.orders:
+    isCycle("C.B.orders")
+      source = "C" (타겟은 A, C≠A)
+      upstream = "B.orders"
+      isCycle("B.orders")
+        source = "B" (타겟은 A, B≠A)
+        upstream = "orders"
+        isCycle("orders")
+          source = null → false
+    → false (순환 아님, 정상 복제)
+
+  - A.orders (이미 A에서 온 토픽):
+    isCycle("A.orders")
+      source = "A" (타겟은 A, A==A)
+      → true! (순환 감지)
+    → 복제 건너뜀
+```
+
+## 15. 성능 고려사항
+
+### 15.1 태스크 수와 처리량
+
+```
+파티션 수와 태스크 수의 관계:
+
+100개 파티션, maxTasks=10:
+  → 각 태스크가 10개 파티션 담당
+  → 라운드로빈으로 균등 분배
+
+처리량 최적화:
+  - tasks.max 증가 → 병렬성 향상
+  - 단, 각 태스크는 독립적인 컨슈머+프로듀서 → 리소스 비례 증가
+  - 최적값: 파티션 수 이하, Connect 워커의 CPU/메모리에 맞춤
+```
+
+### 15.2 동기화 간격 튜닝
+
+```properties
+# 토픽 발견 주기 (기본 30초)
+refresh.topics.interval.seconds = 30
+# 값이 작으면: 새 토픽 빠르게 발견, AdminClient 부하 증가
+# 값이 크면: 새 토픽 발견 지연
+
+# 설정 동기화 주기 (기본 60초)
+sync.topic.configs.interval.seconds = 60
+# 값이 작으면: 설정 변경 빠르게 반영
+# 값이 크면: AdminClient 부하 감소
+
+# ACL 동기화 주기 (기본 60초)
+sync.topic.acls.interval.seconds = 60
+```
+
+### 15.3 Exactly-Once 성능 영향
+
+```
+Exactly-Once 활성화 시:
+  - 프로듀서 트랜잭션 오버헤드: ~5-10% 처리량 감소
+  - 컨슈머 READ_COMMITTED: 트랜잭션 커밋 대기
+  - 소규모 배치 시 상대적 오버헤드 증가
+
+권장:
+  - 데이터 정확성 중요 → Exactly-Once 활성화
+  - 높은 처리량 필요, 약간의 중복 허용 → At-Least-Once
+```
+
+## 16. 운영 가이드
+
+### 16.1 MM2 모니터링 메트릭
+
+```
+Connect JMX 메트릭:
+  - source-record-poll-total: 소스에서 읽은 레코드 수
+  - source-record-write-total: 타겟에 쓴 레코드 수
+  - replication-latency-ms: 복제 지연시간
+
+MM2 커스텀 메트릭:
+  - record-count: 복제된 레코드 수
+  - byte-count: 복제된 바이트 수
+  - replication-latency-ms-avg: 평균 복제 지연
+```
+
+### 16.2 페일오버 절차
+
+```
+DR 페일오버:
+  1. 소스 클러스터 장애 확인
+  2. CheckpointConnector가 마지막 체크포인트 확인
+  3. 컨슈머를 타겟 클러스터로 전환
+  4. 체크포인트 기반 오프셋으로 소비 재개
+  5. 일부 레코드 중복 가능 (체크포인트 간격만큼)
+
+페일백:
+  1. 소스 클러스터 복구
+  2. 타겟→소스 방향 복제 확인
+  3. 컨슈머를 소스 클러스터로 전환
+```
+
+---
+
 *소스 참조: connect/mirror/src/main/java/org/apache/kafka/connect/mirror/*

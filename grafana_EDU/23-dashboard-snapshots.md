@@ -421,4 +421,243 @@ func CreateDashboardSnapshotPublic(c *contextmodel.ReqContext,
 
 ---
 
+## 14. Store 인터페이스 상세
+
+### 14.1 Store 인터페이스
+
+```go
+// pkg/services/dashboardsnapshots/store.go
+type Store interface {
+    CreateDashboardSnapshot(context.Context, *CreateDashboardSnapshotCommand) (*DashboardSnapshot, error)
+    DeleteDashboardSnapshot(context.Context, *DeleteDashboardSnapshotCommand) error
+    DeleteExpiredSnapshots(context.Context, *DeleteExpiredSnapshotsCommand) error
+    GetDashboardSnapshot(context.Context, *GetDashboardSnapshotQuery) (*DashboardSnapshot, error)
+    SearchDashboardSnapshots(context.Context, *GetDashboardSnapshotsQuery) (DashboardSnapshotsList, error)
+}
+```
+
+### 14.2 DashboardSnapshotStore (SQL 구현)
+
+```go
+// pkg/services/dashboardsnapshots/database/database.go
+type DashboardSnapshotStore struct {
+    store db.DB
+}
+```
+
+**왜 xorm/SQL을 직접 사용하는가?** Grafana는 SQLite, PostgreSQL, MySQL을 지원하는 멀티 데이터베이스 아키텍처이다. `db.DB`는 이 세 가지 DB에 대해 통일된 세션 관리를 제공하며, 각 DB의 SQL 방언 차이를 추상화한다.
+
+### 14.3 CreateDashboardSnapshot SQL
+
+```go
+func (d *DashboardSnapshotStore) CreateDashboardSnapshot(ctx context.Context,
+    cmd *CreateDashboardSnapshotCommand) (*DashboardSnapshot, error) {
+    return d.store.WithTransactionalDbSession(ctx, func(sess *db.Session) error {
+        var expires = time.Now().Add(time.Hour * 24 * 365 * 50) // 50년
+        if cmd.Expires > 0 {
+            expires = time.Now().Add(time.Second * time.Duration(cmd.Expires))
+        }
+
+        snapshot := &DashboardSnapshot{
+            Name:               cmd.Name,
+            Key:                cmd.Key,
+            DeleteKey:          cmd.DeleteKey,
+            OrgID:              cmd.OrgID,
+            UserID:             cmd.UserID,
+            External:           cmd.External,
+            ExternalURL:        cmd.ExternalURL,
+            ExternalDeleteURL:  cmd.ExternalDeleteURL,
+            Expires:            expires,
+            DashboardEncrypted: cmd.DashboardEncrypted,
+            Created:            time.Now(),
+            Updated:            time.Now(),
+        }
+        _, err := sess.Insert(snapshot)
+        return snapshot, err
+    })
+}
+```
+
+## 15. ServiceImpl 암호화/복호화 흐름
+
+### 15.1 암호화 저장
+
+```
+CreateDashboardSnapshot():
+    cmd.Dashboard (JSON)
+        │
+        ▼
+    MarshalJSON() → []byte
+        │
+        ▼
+    secretsService.Encrypt(ctx, bytes, secrets.WithoutScope())
+        │
+        ▼
+    cmd.DashboardEncrypted (암호화된 []byte)
+        │
+        ▼
+    store.CreateDashboardSnapshot() → DB 저장
+```
+
+### 15.2 복호화 조회
+
+```
+GetDashboardSnapshot():
+    store.GetDashboardSnapshot() → DB 조회
+        │
+        ▼
+    queryResult.DashboardEncrypted != nil?
+        │
+        ├─ YES → secretsService.Decrypt(ctx, encrypted)
+        │            │
+        │            ▼
+        │        simplejson.NewJson(decrypted) → Dashboard
+        │
+        └─ NO → queryResult.Dashboard (암호화 미적용 레거시)
+```
+
+**왜 `secrets.WithoutScope()`인가?** Grafana의 Secret 서비스는 scope 기반 키 관리를 지원한다(예: 데이터소스별 키). 스냅샷은 특정 데이터소스에 속하지 않으므로 루트 레벨 데이터 키를 사용한다.
+
+### 15.3 레거시 호환성
+
+`DashboardEncrypted`가 `nil`인 경우는 암호화 기능 도입 전에 생성된 스냅샷이다. 이 경우 `Dashboard` 필드에 평문 JSON이 직접 저장되어 있으므로 복호화 없이 반환한다.
+
+## 16. 에러 처리 패턴
+
+### 16.1 에러 정의
+
+```go
+// pkg/services/dashboardsnapshots/errors.go
+var (
+    ErrBaseNotFound = errors.New("snapshot not found")
+)
+```
+
+### 16.2 외부 스냅샷 삭제의 방어적 에러 처리
+
+```go
+// 500 에러지만 "snapshot not found"이면 성공으로 처리
+if resp.StatusCode == 500 {
+    var respJson map[string]any
+    json.NewDecoder(resp.Body).Decode(&respJson)
+    if respJson["message"] == "Failed to get dashboard snapshot" {
+        return nil  // 이미 삭제됨 → 성공
+    }
+}
+```
+
+**왜 이 패턴이 필요한가?**
+
+```
+시나리오:
+1. 사용자가 외부 스냅샷 삭제 요청
+2. 외부 서버에서 이미 삭제됨 (다른 경로로)
+3. 외부 서버는 500 에러 + "not found" 메시지 반환
+4. 이를 에러로 처리하면:
+   → 로컬 DB의 스냅샷 레코드가 삭제되지 않음
+   → 좀비 레코드 발생
+5. 성공으로 처리하면:
+   → 로컬 DB도 정리됨
+   → 일관된 상태 유지
+```
+
+### 16.3 ValidateDashboardExists
+
+```go
+func (s *ServiceImpl) ValidateDashboardExists(ctx context.Context,
+    orgID int64, dashboardUID string) error {
+    if dashboardUID == "" {
+        return nil  // UID 없으면 검증 건너뜀
+    }
+    _, err := s.dashboardService.GetDashboard(ctx, ...)
+    return err
+}
+```
+
+스냅샷 생성 시 원본 대시보드가 존재하는지 확인한다. 단, UID가 비어있으면 검증을 건너뛴다 (공개 모드 등에서 대시보드 정보 없이 스냅샷 생성 가능).
+
+## 17. 성능 고려사항
+
+### 17.1 암호화 비용
+
+```
+Encrypt/Decrypt 비용:
+  - AES-GCM 암호화: O(N) where N = 데이터 크기
+  - 일반적인 대시보드 JSON: 10KB~1MB
+  - 암호화 오버헤드: <1ms (10KB), ~5ms (1MB)
+
+대시보드 데이터가 매우 큰 경우(수십 MB):
+  - 스냅샷 생성 시간이 길어질 수 있음
+  - DB 저장 시 트랜잭션 타임아웃 가능
+```
+
+### 17.2 만료 정리 성능
+
+```sql
+-- DeleteExpiredSnapshots SQL
+DELETE FROM dashboard_snapshot WHERE expires < ?
+
+-- 인덱스 없으면 전체 테이블 스캔
+-- expires 컬럼에 인덱스 권장
+CREATE INDEX idx_dashboard_snapshot_expires ON dashboard_snapshot(expires);
+```
+
+### 17.3 검색 쿼리 최적화
+
+```go
+// SearchDashboardSnapshots에서 역할 기반 필터링
+// Admin: org_id = ? (인덱스 활용)
+// User: org_id = ? AND user_id = ? (복합 인덱스 활용)
+// Default: 빈 결과 (쿼리 실행 안 함)
+
+// 성능 포인트:
+// - Admin 쿼리는 org_id 인덱스로 충분
+// - User 쿼리는 (org_id, user_id) 복합 인덱스가 최적
+// - Limit 파라미터로 결과 수 제한
+```
+
+## 18. 테스트 전략
+
+### 18.1 Mock 서비스
+
+```go
+// pkg/services/dashboardsnapshots/service_mock.go
+type MockService struct {
+    mock.Mock
+}
+
+func (m *MockService) CreateDashboardSnapshot(ctx context.Context,
+    cmd *CreateDashboardSnapshotCommand) (*DashboardSnapshot, error) {
+    args := m.Called(ctx, cmd)
+    return args.Get(0).(*DashboardSnapshot), args.Error(1)
+}
+```
+
+### 18.2 핵심 테스트 시나리오
+
+```
+1. 생성 → 조회 왕복
+   - 스냅샷 생성 → Key로 조회 → 데이터 일치 확인
+   - 암호화된 데이터가 복호화되어 반환되는지 확인
+
+2. 만료 처리
+   - Expires=1초 스냅샷 생성 → 2초 대기 → DeleteExpired → 삭제 확인
+
+3. 키 분리
+   - Key로 조회 → 성공
+   - DeleteKey로 삭제 → 성공
+   - Key로 삭제 시도 → 실패 (키 분리 보장)
+
+4. 접근 제어
+   - Admin: 조직 전체 스냅샷 검색 가능
+   - User: 자신의 스냅샷만 검색 가능
+   - Anonymous: 빈 결과
+
+5. 외부 스냅샷
+   - 외부 서버에 스냅샷 생성 → URL 반환 확인
+   - 외부 스냅샷 삭제 → 로컬 + 외부 모두 삭제 확인
+```
+
+---
+
 *검증 도구: Claude Code (Opus 4.6)*

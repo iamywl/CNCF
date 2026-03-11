@@ -416,3 +416,195 @@ alertmanager --cluster.listen-address=""
 │  컨테이너: 두 프로토콜 모두 노출  │
 └──────────────────────────────────┘
 ```
+
+## 19. Settle 알고리즘 상세
+
+```go
+// cluster/cluster.go:680
+func (p *Peer) Settle(ctx context.Context, interval time.Duration) {
+    // 멤버 수가 연속 N번 동일하면 안정화 판단
+}
+```
+
+### 19.1 안정화 판단 로직
+
+```
+Settle() 동작:
+
+ticker := time.NewTicker(interval)
+count := 0
+stableCount := 0
+const requiredStable = 3  // 연속 안정 횟수
+
+for {
+    select {
+    case <-ticker.C:
+        currentMembers := p.mlist.NumMembers()
+        if currentMembers == lastCount {
+            stableCount++
+        } else {
+            stableCount = 0
+        }
+        lastCount = currentMembers
+
+        if stableCount >= requiredStable {
+            close(p.readyc)  // 준비 완료 신호
+            return
+        }
+    case <-ctx.Done():
+        close(p.readyc)  // 타임아웃 시에도 준비 완료
+        return
+    }
+}
+```
+
+**왜 연속 N번 동일을 요구하는가?** 클러스터 형성 초기에는 노드가 하나씩 합류하므로 멤버 수가 계속 변한다. 한 번 동일한 것만으로는 "아직 합류 중"인지 "모두 합류 완료"인지 구분할 수 없다. 연속 3번 동일하면 충분히 안정화된 것으로 판단한다.
+
+### 19.2 WaitReady와 GossipSettleStage
+
+```go
+// cluster/cluster.go
+func (p *Peer) WaitReady(ctx context.Context) error {
+    select {
+    case <-p.readyc:    // Settle 완료
+        return nil
+    case <-ctx.Done():  // 타임아웃
+        return ctx.Err()
+    }
+}
+```
+
+GossipSettleStage에서 `WaitReady`를 호출하여, 클러스터가 안정화되기 전에 알림을 보내지 않는다. 이는 시작 직후 nflog가 동기화되지 않은 상태에서 중복 알림이 발생하는 것을 방지한다.
+
+## 20. Peer 재연결 메커니즘
+
+### 20.1 reconnect goroutine
+
+```
+Join() 내부에서 시작되는 재연결 루프:
+
+for {
+    select {
+    case <-ticker.C:
+        // 실패한 피어 목록 확인
+        for _, failedPeer := range p.failedPeers {
+            // 마지막 실패 후 reconnectTimeout 경과 시 포기
+            if time.Since(failedPeer.leaveTime) > reconnectTimeout {
+                continue  // 영구 실패로 판단
+            }
+            // 재연결 시도
+            p.mlist.Join([]string{failedPeer.Address()})
+        }
+    case <-p.stopc:
+        return
+    }
+}
+```
+
+### 20.2 피어 상태 전이
+
+```
+Unknown → Join → Alive
+                    │
+                    ├─ 정상 운영
+                    │
+                    └─ 실패 감지 → Failed
+                         │
+                         ├─ reconnect 성공 → Alive
+                         │
+                         └─ reconnectTimeout 경과 → 제거
+```
+
+## 21. 에러 처리 패턴
+
+```
+클러스터 에러 분류:
+
+1. 네트워크 에러
+   ├─ DNS 해석 실패 → 재시도 (resolvePeersTimeout까지)
+   ├─ TCP 연결 실패 → 피어를 Failed로 표시, 재연결 시도
+   └─ UDP 패킷 손실 → memberlist가 자동 재전송
+
+2. 상태 동기화 에러
+   ├─ Merge 실패 → 에러 로깅, 다음 Push-Pull에서 복구
+   ├─ MarshalBinary 실패 → Push-Pull 건너뜀
+   └─ 메시지 크기 초과 → Gossip 전파 실패, Push-Pull로 복구
+
+3. TLS 에러
+   ├─ 인증서 만료 → 연결 실패, 갱신 필요
+   ├─ CA 불일치 → 연결 거부
+   └─ 클라이언트 인증 실패 → 양방향 TLS 설정 확인
+
+4. 클러스터 라벨 불일치
+   └─ 다른 라벨의 피어 메시지 → 무시 (에러 아님)
+```
+
+## 22. 성능 고려사항
+
+### 22.1 Gossip 대역폭
+
+```
+Gossip 메시지 크기:
+  - 단일 Silence 변경: ~100-500 bytes
+  - 단일 nflog 엔트리: ~50-200 bytes
+
+Gossip 빈도 (기본 200ms):
+  - 초당 ~5회 Gossip 라운드
+  - 각 라운드에서 TransmitLimitedQueue의 메시지 전송
+
+대역폭 추정 (10-노드 클러스터):
+  - Silence 변경 100건/분 → ~50KB/분
+  - nflog 변경 1000건/분 → ~200KB/분
+  - Push-Pull (1분 간격): 전체 상태 크기에 비례
+```
+
+### 22.2 Push-Pull 비용
+
+```
+Push-Pull 교환:
+  - LocalState() → 전체 상태 직렬화
+    - nflog: 모든 발송 기록 Protobuf 직렬화
+    - Silences: 모든 Silence Protobuf 직렬화
+  - MergeRemoteState() → 전체 상태 역직렬화 + 병합
+
+비용: O(N_nflog + N_silence) 직렬화/역직렬화
+대규모 환경에서:
+  - nflog 10,000 엔트리 → ~2MB
+  - Silences 1,000개 → ~500KB
+  - Push-Pull 간격을 늘리면 대역폭 절약, 동기화 지연 증가
+```
+
+### 22.3 멤버 수와 Gossip 확산 시간
+
+```
+Gossip 확산 시간 (200ms 간격):
+  3-노드: ~400ms (1-2 라운드)
+  5-노드: ~600ms (2-3 라운드)
+  10-노드: ~1s (4-5 라운드)
+
+  이론적 최대: O(log N × gossipInterval)
+
+실전에서는 Alertmanager 클러스터를 3~5 노드로 유지하므로,
+확산 시간은 보통 1초 이내이다.
+```
+
+## 23. 운영 가이드
+
+### 23.1 클러스터 상태 확인
+
+```bash
+# API로 클러스터 멤버 확인
+curl localhost:9093/api/v2/status | jq '.cluster'
+
+# 메트릭으로 건강 상태 확인
+curl localhost:9093/metrics | grep alertmanager_cluster
+```
+
+### 23.2 클러스터 트러블슈팅
+
+| 증상 | 확인 항목 | 해결 |
+|------|----------|------|
+| 멤버 수 불일치 | 네트워크 방화벽 (UDP+TCP 9094) | 양방향 통신 허용 |
+| 알림 중복 | nflog 동기화 지연 | Push-Pull 간격 축소 |
+| Silence 불일치 | health_score 메트릭 | 피어 재시작 |
+| TLS 연결 실패 | 인증서 유효기간 | 인증서 갱신 |

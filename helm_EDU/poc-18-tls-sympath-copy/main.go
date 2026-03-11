@@ -204,12 +204,19 @@ func (fs *SimulatedFS) IsSymlink(path string) bool {
 // EvalSymlinks는 심볼릭 링크를 해석한다.
 // 실제 소스: filepath.EvalSymlinks 호출
 func (fs *SimulatedFS) EvalSymlinks(path string) (string, error) {
+	return fs.evalSymlinksDepth(path, 0)
+}
+
+func (fs *SimulatedFS) evalSymlinksDepth(path string, depth int) (string, error) {
+	if depth > 10 {
+		return "", fmt.Errorf("symlink cycle detected: %s", path)
+	}
 	target, ok := fs.symlinks[path]
 	if !ok {
 		return path, nil
 	}
 	// 재귀 해석 (체인된 심볼릭 링크)
-	return fs.EvalSymlinks(target)
+	return fs.evalSymlinksDepth(target, depth+1)
 }
 
 // readDirNames는 디렉토리 내 항목을 정렬하여 반환한다.
