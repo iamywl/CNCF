@@ -327,4 +327,200 @@ type TagsDTO struct {
 
 ---
 
+---
+
+## 11. 실제 소스 코드 심화 분석
+
+### 11.1 RepositoryImpl — Reader/Writer 분리
+
+```go
+// 소스: pkg/services/annotations/annotationsimpl/annotations.go
+type RepositoryImpl struct {
+    reader ReadStore      // CompositeStore (병렬 조회)
+    writer WriteStore     // XormStore (SQL 쓰기)
+    authZ  AuthService    // RBAC 접근 제어
+}
+```
+
+**왜 Reader와 Writer를 분리하는가?**
+
+읽기는 CompositeStore를 통해 SQL + Loki를 병렬로 조회하지만, 쓰기는 SQL만 대상으로 한다. Loki에는 알림 히스토리가 NG Alert 시스템에 의해 자동으로 기록되므로, Annotations API에서 직접 쓰지 않는다. 이 분리는 읽기/쓰기 경로가 근본적으로 다른 비대칭 아키텍처를 반영한다.
+
+### 11.2 Find()의 접근 제어 최적화
+
+```go
+// 소스: pkg/services/annotations/annotationsimpl/annotations.go (79-126행)
+func (r *RepositoryImpl) Find(ctx context.Context, query *annotations.ItemQuery) ([]*annotations.ItemDTO, error) {
+    // 최적화: 대시보드 필터 없는 조회는 먼저 접근 제어 없이 카운트
+    if query.DashboardID == 0 && query.DashboardUID == "" {
+        res, err := r.reader.Get(ctx, *query, &accesscontrol.AccessResources{
+            SkipAccessControlFilter: true,
+        })
+        if err != nil || len(res) == 0 {
+            return []*annotations.ItemDTO{}, err
+        }
+        query.Limit = int64(len(res))  // 실제 존재하는 만큼만 조회
+    }
+    // ...
+}
+```
+
+**왜 먼저 접근 제어 없이 조회하는가?**
+
+접근 제어 필터링은 비용이 높다(대시보드 권한 테이블 JOIN 필요). 대시보드 특정 필터가 없는 경우(조직 전체 주석 조회), 먼저 접근 제어 없이 존재 여부와 수를 확인한다. 결과가 없으면 빈 배열을 바로 반환하여 불필요한 권한 검사를 건너뛴다.
+
+### 11.3 CompositeStore — 병렬 조회의 에러 처리
+
+```go
+// 소스: pkg/services/annotations/annotationsimpl/composite_store.go (35-57행)
+func (c *CompositeStore) Get(ctx context.Context, query annotations.ItemQuery,
+    accessResources *accesscontrol.AccessResources) ([]*annotations.ItemDTO, error) {
+
+    itemCh := make(chan []*annotations.ItemDTO, len(c.readers))
+    err := concurrency.ForEachJob(ctx, len(c.readers), len(c.readers),
+        func(ctx context.Context, i int) (err error) {
+            defer handleJobPanic(c.logger, c.readers[i].Type(), &err)
+            items, err := c.readers[i].Get(ctx, query, accessResources)
+            itemCh <- items  // 에러가 있어도 결과는 전송
+            return err
+        })
+    // ...
+}
+```
+
+**왜 에러가 있어도 결과를 전송하는가?**
+
+Loki가 일시적으로 불가용해도 SQL 주석은 정상적으로 반환해야 한다. `concurrency.ForEachJob`은 모든 job의 에러를 수집하지만, 각 job은 에러 발생 시에도 부분 결과를 채널에 보낼 수 있다.
+
+### 11.4 Cleaner 인터페이스
+
+```go
+// 소스: pkg/services/annotations/annotations.go
+type Cleaner interface {
+    Run(ctx context.Context, cfg *setting.Cfg) (int64, int64, error)
+}
+```
+
+정리 서비스는 Grafana의 스케줄러에 의해 주기적으로 호출된다. 반환값은 `(삭제된 주석 수, 삭제된 태그 수, 에러)`이다.
+
+### 11.5 정리 설정 (grafana.ini)
+
+```ini
+[unified_alerting]
+# 알림 히스토리 주석 보존 기간
+min_interval = 10s
+
+[annotations.alert]
+# 알림 주석 정리 설정
+max_age = 0        # 0 = 무제한
+max_count = 0      # 0 = 무제한
+
+[annotations.dashboard]
+# 대시보드 주석 정리 설정
+max_age = 0
+max_count = 0
+
+[annotations.api]
+# API 주석 정리 설정
+max_age = 0
+max_count = 0
+```
+
+세 가지 주석 유형(alert, dashboard, api)에 대해 독립적으로 보존 정책을 설정할 수 있다.
+
+---
+
+## 12. 태그 시스템 상세
+
+### 12.1 태그 저장 구조 (SQL)
+
+```
+annotation 테이블:
+    id | org_id | dashboard_id | text | epoch | epoch_end | ...
+
+annotation_tag 테이블:
+    id | annotation_id | tag_id
+
+tag 테이블:
+    id | term | key | value
+
+관계:
+    annotation 1 ──── N annotation_tag N ──── 1 tag
+```
+
+태그는 `key:value` 형식으로 저장되며, `key`와 `value`가 별도 컬럼에 분리된다. `term`은 `key:value` 전체 문자열이다.
+
+### 12.2 태그 기반 필터링
+
+```go
+// ItemQuery에서 태그 필터링
+query := &ItemQuery{
+    Tags:     []string{"deploy", "team:backend"},
+    MatchAny: false,  // AND 매칭 (모든 태그 포함)
+}
+```
+
+| MatchAny | SQL 조건 | 의미 |
+|----------|---------|------|
+| false | `HAVING COUNT(DISTINCT tag.id) = len(tags)` | 모든 태그를 포함하는 주석 |
+| true | `tag.term IN (...)` | 하나 이상의 태그를 포함하는 주석 |
+
+---
+
+## 13. SortedItems — 정렬의 이유
+
+```go
+// 소스: pkg/services/annotations/models.go (141-155행)
+func (s SortedItems) Less(i, j int) bool {
+    if s[i].TimeEnd != s[j].TimeEnd {
+        return s[i].TimeEnd > s[j].TimeEnd  // 종료 시간 내림차순
+    }
+    return s[i].Time > s[j].Time            // 시작 시간 내림차순
+}
+```
+
+**왜 종료 시간 우선 내림차순인가?**
+
+CompositeStore가 여러 소스의 결과를 병합할 때 통일된 정렬이 필요하다. 종료 시간(TimeEnd)이 같으면 시작 시간으로 비교한다. 내림차순이므로 최신 주석이 먼저 나온다. 이는 대시보드에서 "최근 이벤트"를 먼저 표시하는 UX 요구사항을 반영한다.
+
+---
+
+## 14. 에러 처리 패턴
+
+```go
+// 소스: pkg/services/dashboardsnapshots/errors.go
+var (
+    ErrBaseNotFound = errors.New("annotations.base-not-found")
+)
+```
+
+```
+에러 전파 경로:
+    Store → Repository → HTTP Handler
+
+    Store 에러:
+    ├── SQL 에러 → 그대로 전파
+    ├── 권한 없음 → accesscontrol 에러
+    └── 데이터 없음 → ErrBaseNotFound
+
+    CompositeStore 에러:
+    ├── 모든 Reader 실패 → 에러 반환
+    ├── 일부 Reader 실패 → 부분 결과 + 경고 로그
+    └── 패닉 → handleJobPanic으로 복구 + 에러 변환
+```
+
+---
+
+## 15. 성능 고려사항
+
+| 최적화 | 구현 | 효과 |
+|--------|------|------|
+| 접근 제어 사전 검사 | 필터 없는 조회 시 먼저 카운트 | 불필요한 JOIN 방지 |
+| 병렬 조회 | `concurrency.ForEachJob` | SQL + Loki 동시 조회 |
+| 이중 페이지네이션 | 대시보드 → 주석 순차 페이징 | 대량 대시보드 환경 대응 |
+| 고아 태그 정리 | 주석 삭제 후 참조 없는 태그 제거 | 태그 테이블 비대화 방지 |
+| 만료 주석 배치 삭제 | `DELETE ... WHERE expires < ?` | 전체 스캔 대신 인덱스 활용 |
+
+---
+
 *검증 도구: Claude Code (Opus 4.6)*

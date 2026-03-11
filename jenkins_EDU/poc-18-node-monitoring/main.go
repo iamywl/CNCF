@@ -175,6 +175,7 @@ func (m *ClockMonitor) Monitor(c *Computer) (interface{}, error) {
 // Jenkins 원본: hudson/node_monitors/ResponseTimeMonitor.java
 type ResponseTimeMonitor struct {
 	Ignored    bool
+	mu         sync.Mutex
 	prevData   map[string]*ResponseTimeData
 }
 
@@ -183,6 +184,9 @@ func (m *ResponseTimeMonitor) CanTakeOffline() bool   { return true }
 func (m *ResponseTimeMonitor) IsIgnored() bool        { return m.Ignored }
 
 func (m *ResponseTimeMonitor) Monitor(c *Computer) (interface{}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.prevData == nil {
 		m.prevData = make(map[string]*ResponseTimeData)
 	}

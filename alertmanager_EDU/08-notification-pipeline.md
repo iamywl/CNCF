@@ -397,3 +397,236 @@ RetryStage 에러 처리:
     │ → 성공                     │
     └───────────────────────────┘
 ```
+
+## 11. OpenTelemetry 추적
+
+### 11.1 tracer 초기화
+
+```go
+// notify/notify.go
+var tracer = otel.Tracer("github.com/prometheus/alertmanager/notify")
+```
+
+### 11.2 Integration.Notify() 추적
+
+```go
+func (i *Integration) Notify(ctx context.Context, alerts ...*types.Alert) (recoverable bool, err error) {
+    ctx, span := tracer.Start(ctx, "notify.Integration.Notify",
+        trace.WithAttributes(
+            attribute.String("alerting.notify.integration.name", i.name)),
+        trace.WithAttributes(
+            attribute.Int("alerting.alerts.count", len(alerts))),
+        trace.WithSpanKind(trace.SpanKindClient),
+    )
+    defer func() {
+        span.SetAttributes(
+            attribute.Bool("alerting.notify.error.recoverable", recoverable))
+        if err != nil {
+            span.SetStatus(codes.Error, err.Error())
+            span.RecordError(err)
+        }
+        span.End()
+    }()
+    recoverable, err = i.notifier.Notify(ctx, alerts...)
+    return recoverable, err
+}
+```
+
+**왜 SpanKindClient인가?** Integration은 외부 서비스(Slack, PagerDuty 등)에 HTTP 요청을 보내는 클라이언트 역할이므로 `SpanKindClient`로 표시한다. 이를 통해 분산 추적 UI에서 알림 전송의 외부 서비스 호출을 명확히 구분할 수 있다.
+
+```
+추적 계층:
+
+Dispatcher.flush() (내부 span)
+  └─ RoutingStage.Exec()
+       └─ MuteStage.Exec() (Inhibitor)
+            └─ MuteStage.Exec() (Silencer)
+                 └─ FanoutStage.Exec()
+                      ├─ RetryStage.Exec()
+                      │    └─ Integration.Notify() (client span)
+                      │         └─ HTTP POST slack.com
+                      └─ RetryStage.Exec()
+                           └─ Integration.Notify() (client span)
+                                └─ SMTP email
+```
+
+## 12. Context 데이터 전달 상세
+
+### 12.1 With* 함수 패턴
+
+```go
+// notify/notify.go
+func WithReceiverName(ctx context.Context, rcv string) context.Context {
+    return context.WithValue(ctx, keyReceiverName, rcv)
+}
+
+func WithGroupKey(ctx context.Context, s string) context.Context {
+    return context.WithValue(ctx, keyGroupKey, s)
+}
+
+func WithFiringAlerts(ctx context.Context, alerts []uint64) context.Context {
+    return context.WithValue(ctx, keyFiringAlerts, alerts)
+}
+```
+
+### 12.2 notifyKey 타입 안전성
+
+```go
+type notifyKey int
+
+const (
+    keyReceiverName notifyKey = iota
+    keyRepeatInterval
+    keyGroupLabels
+    keyGroupKey
+    // ...
+)
+```
+
+**왜 사용자 정의 타입을 사용하는가?** Go의 `context.WithValue`는 키로 `any` 타입을 받는다. `string`이나 `int`를 직접 사용하면 다른 패키지와 키 충돌이 발생할 수 있다. `notifyKey` 타입은 `notify` 패키지 내에서만 생성 가능하므로 충돌이 방지된다.
+
+### 12.3 NotifyReason
+
+```go
+// notify/notify.go
+func WithNotificationReason(ctx context.Context, reason NotifyReason) context.Context {
+    return context.WithValue(ctx, keyNotificationReason, reason)
+}
+```
+
+알림 사유("new", "resolved", "repeat" 등)를 Context에 저장하여 로깅과 메트릭에서 사용한다.
+
+## 13. MultiStage의 조기 종료 최적화
+
+```go
+func (ms MultiStage) Exec(ctx context.Context, l *slog.Logger,
+    alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
+    var err error
+    for _, s := range ms {
+        if len(alerts) == 0 {
+            return ctx, nil, nil  // Alert가 모두 필터링됨 → 조기 종료
+        }
+        ctx, alerts, err = s.Exec(ctx, l, alerts...)
+        if err != nil {
+            return ctx, nil, err
+        }
+    }
+    return ctx, alerts, nil
+}
+```
+
+**왜 `len(alerts) == 0` 검사가 중요한가?** MuteStage(Inhibitor/Silencer)에서 모든 Alert가 필터링되면 빈 슬라이스가 된다. 이후 DedupStage, RetryStage를 실행하는 것은 불필요한 비용이므로, 즉시 반환하여 리소스를 절약한다. 특히 RetryStage는 외부 HTTP 요청을 수반하므로, 이 최적화의 효과가 크다.
+
+## 14. FanoutStage의 병렬 실행 패턴
+
+```
+FanoutStage.Exec():
+    각 Integration Stage를 goroutine으로 실행:
+
+    ┌─────────────────┐
+    │  FanoutStage    │
+    │                 │
+    │  errgroup.Go()  │
+    │  ├─ Slack Stage │──── goroutine 1
+    │  ├─ Email Stage │──── goroutine 2
+    │  └─ PD Stage    │──── goroutine 3
+    │                 │
+    │  errgroup.Wait()│ ← 모든 goroutine 완료 대기
+    └─────────────────┘
+
+    에러 처리:
+    - 하나의 Integration이 실패해도 다른 Integration은 계속 실행
+    - 모든 완료 후 에러 합산
+```
+
+**왜 병렬 실행인가?** Slack API 호출에 2초, Email 전송에 3초가 걸리면, 순차 실행 시 5초지만 병렬 실행 시 3초이다. 알림 지연을 최소화하기 위해 병렬 실행이 필수적이다.
+
+## 15. 성능 고려사항
+
+### 15.1 Pipeline 실행 비용
+
+```
+비용 분석 (Alert 그룹 flush 1회):
+
+저비용 Stage:
+  - GossipSettleStage: 시작 후 1회만 대기, 이후 즉시 통과
+  - MuteStage: Alert 수 × Muter 호출 (메모리 연산)
+  - TimeMuteStage/TimeActiveStage: 현재 시간 비교 (O(1))
+
+중비용 Stage:
+  - DedupStage: nflog 쿼리 (메모리 맵 조회)
+  - SetNotifiesStage: nflog 기록 + 클러스터 브로드캐스트
+
+고비용 Stage:
+  - RetryStage: 외부 HTTP 요청 (네트워크 I/O)
+    - 성공: 1회 요청
+    - 실패 + 재시도: exponential backoff (100ms ~ 5min)
+```
+
+### 15.2 Backoff 재시도 설정
+
+```
+RetryStage의 cenkalti/backoff 설정:
+  InitialInterval: 100ms
+  MaxInterval: 5min
+  Multiplier: 2
+  RandomizationFactor: 0.5
+
+재시도 시퀀스 (최악):
+  100ms → 200ms → 400ms → 800ms → 1.6s → 3.2s → ... → 5min (cap)
+
+총 재시도 시간: context deadline까지 (기본 MinTimeout = 10s)
+```
+
+### 15.3 Pipeline 재구축 비용
+
+```
+설정 리로드 시:
+  1. 모든 Receiver의 Integration 재생성 (HTTP 클라이언트 포함)
+  2. RoutingStage 맵 재구축
+  3. MuteStage 참조 업데이트 (Inhibitor, Silencer)
+
+비용: Receiver 수 × Integration 수에 비례
+100개 Receiver, 각 2개 Integration → 200개 Integration 재생성
+이 과정에서 진행 중인 알림은 이전 Pipeline에서 완료된다.
+```
+
+## 16. 테스트 전략
+
+### 16.1 Stage 단위 테스트
+
+각 Stage는 독립적으로 테스트 가능하다:
+
+```
+MuteStage 테스트:
+  - Muter가 true 반환 → Alert 필터링 확인
+  - Muter가 false 반환 → Alert 통과 확인
+  - 빈 Alert 목록 → 빈 결과 반환
+
+DedupStage 테스트:
+  - 새로운 Alert → 통과
+  - 이전과 동일한 Alert + RepeatInterval 미경과 → 필터링
+  - 이전과 동일한 Alert + RepeatInterval 경과 → 통과
+  - resolved Alert 추가 → 통과
+
+RetryStage 테스트:
+  - 성공 → 메트릭 기록
+  - recoverable 에러 → 재시도 후 성공
+  - permanent 에러 → 즉시 실패
+```
+
+### 16.2 통합 테스트 패턴
+
+```
+MultiStage 통합 테스트:
+  입력: [Alert1, Alert2, Alert3]
+  MuteStage(Alert2 필터링)
+  → [Alert1, Alert3]
+  DedupStage(Alert1 중복)
+  → [Alert3]
+  RetryStage(Alert3 전송 성공)
+  → [Alert3]
+  SetNotifiesStage(기록)
+
+  검증: Alert3만 전송됨, nflog에 기록됨
+```

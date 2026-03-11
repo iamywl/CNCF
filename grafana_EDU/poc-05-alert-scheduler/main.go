@@ -434,16 +434,16 @@ func main() {
 	fmt.Println("  Memory: .  x  .  x  .  x  .  x  .  x  .  x  .  x  .  (2틱마다)")
 	fmt.Println("  Error:  .  .  x  .  .  x  .  .  x  .  .  x  .  .  x  (3틱마다)")
 
-	// 15초 후 error_rate 메트릭을 NoData로 전환
+	// 5초 후 error_rate 메트릭을 NoData로 전환
 	go func() {
-		time.Sleep(15 * time.Second)
+		time.Sleep(5 * time.Second)
 		fmt.Println("\n  *** [이벤트] error_rate 메트릭 NoData 전환 ***")
 		metrics.SetNoData("error_rate", true)
 	}()
 
-	// 스케줄러 실행 (30초)
-	fmt.Println("\n--- 스케줄러 실행 (30초) ---")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 스케줄러 실행 (8초)
+	fmt.Println("\n--- 스케줄러 실행 (8초) ---")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	scheduler.Run(ctx)
@@ -453,7 +453,7 @@ func main() {
 
 	// 아키텍처 설명
 	fmt.Println("\n--- Grafana Alert Scheduler 아키텍처 ---")
-	fmt.Println(`
+	fmt.Print(`
   ┌──────────────────────────────────────────────────────┐
   │                  Alert Scheduler                      │
   │                                                       │

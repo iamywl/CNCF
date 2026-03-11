@@ -331,3 +331,177 @@ func openAPIAlertsToAlerts(apiAlerts open_api_models.PostableAlerts) []*types.Al
 ```
 
 API 모델(go-swagger 생성)과 내부 모델(types.Alert) 간의 변환을 담당한다.
+
+## 12. 실제 소스 코드 심화 분석
+
+### 12.1 postAlertsHandler — Alert 유효성 검증 상세
+
+```
+postAlertsHandler(params):
+    각 Alert에 대해:
+    1. Labels 검증:
+       - Labels가 nil이거나 비어있으면 → invalid 카운터 증가, 건너뜀
+       - model.LabelName 유효성 검사 (영문자, 숫자, _만 허용)
+       - model.LabelValue 유효성 검사 (UTF-8)
+
+    2. 시간 설정:
+       - StartsAt 미지정 → now
+       - EndsAt 미지정 → StartsAt + Global.ResolveTimeout
+       - EndsAt가 StartsAt 이전이면 → EndsAt = StartsAt + ResolveTimeout
+
+    3. Annotations 검증:
+       - Annotation 이름 유효성 검사
+
+    4. 유효한 Alert만 alerts.Put()으로 저장
+    5. setAlertStatus() → Silencer 매칭 상태 업데이트
+
+    에러 메시지 수집:
+    - 유효하지 않은 Alert은 건너뛰되, 에러 메시지를 모은다
+    - 유효한 Alert이 하나도 없으면 400 반환
+    - 일부만 유효하면 유효한 것만 저장 + 200 반환
+```
+
+**왜 부분 성공을 허용하는가?**
+
+Prometheus가 여러 Alert를 한 번에 전송할 때, 일부 Alert의 레이블이 잘못되었다고 전체를 거부하면 유효한 Alert도 처리되지 않는다. 부분 성공으로 유효한 Alert은 즉시 처리하면서, 잘못된 Alert은 로그에 기록한다.
+
+### 12.2 getAlertsHandler — Receiver 기반 필터링
+
+```
+getAlertsHandler에서 receiver 파라미터:
+    1. Route 트리에서 해당 receiver로 매칭되는 Route 찾기
+    2. 각 Alert에 대해:
+       - Alert Labels가 해당 Route에 매칭되는지 확인
+       - 매칭되면 결과에 포함
+    3. 여러 Route가 동일 receiver를 사용하면 모두 확인
+
+이 필터는 "이 Receiver가 처리할 Alert만 보여줘"라는 의미이다.
+```
+
+### 12.3 getAlertGroupsHandler — 그룹 뮤트 상태
+
+```go
+// api/v2/api.go
+// 각 AlertGroup에 대해 뮤트 상태를 확인
+mutedBy, isMuted := api.groupMutedFunc(routeID, group.Key())
+if isMuted {
+    alertGroup.MutedBy = mutedBy  // 뮤트 원인 (TimeInterval 이름)
+}
+```
+
+**왜 그룹 단위로 뮤트 상태를 확인하는가?**
+
+TimeInterval(mute_time_intervals)은 Route 단위로 적용된다. Route → Group 관계에서, Route가 뮤트되면 해당 Route의 모든 Group이 뮤트된다. API 응답에 뮤트 원인(TimeInterval 이름)을 포함하여 UI에서 표시한다.
+
+---
+
+## 13. 에러 처리 패턴
+
+### 13.1 API 에러 응답 형식
+
+```json
+// 400 Bad Request
+{
+    "status": "error",
+    "errorType": "bad_data",
+    "error": "invalid label set: ..."
+}
+
+// 404 Not Found
+{
+    "status": "error",
+    "errorType": "not_found",
+    "error": "silence 12345 not found"
+}
+
+// 503 Service Unavailable (동시성 제한 초과)
+{
+    "status": "error",
+    "errorType": "server_error",
+    "error": "concurrency limit reached"
+}
+```
+
+### 13.2 동시성 제한 메커니즘
+
+```
+limitHandler 동작:
+    inFlightSem = make(chan struct{}, Concurrency)
+
+    GET 요청:
+    ├── select {
+    │   case inFlightSem <- struct{}{}:  // 토큰 확보
+    │       defer <-inFlightSem          // 완료 후 토큰 반환
+    │       handler.ServeHTTP(w, r)      // 핸들러 실행
+    │   case <-time.After(timeout):      // 타임아웃
+    │       503 Service Unavailable
+    │       concurrencyLimitExceeded.Inc()
+    │   }
+
+    POST/DELETE 요청:
+    └── 동시성 제한 없이 직접 실행
+```
+
+**왜 GET만 제한하고 POST는 제한하지 않는가?**
+
+GET은 Alert/Silence 전체 목록을 조회하는 비용이 높은 작업이다. 대시보드 등에서 자동 폴링하면 대량 GET이 발생할 수 있다. POST는 Alert 수신이므로 지연되면 모니터링 공백이 생긴다.
+
+---
+
+## 14. 성능 고려사항
+
+| 항목 | 설계 | 이유 |
+|------|------|------|
+| GET 동시성 제한 | 세마포어 채널 | 대량 폴링으로 인한 과부하 방지 |
+| Alert 부분 성공 | 유효한 Alert만 저장 | Prometheus 전송 실패 최소화 |
+| RWMutex | config, route 읽기/쓰기 분리 | 설정 리로드 중에도 API 응답 가능 |
+| go-swagger 코드 생성 | 자동 생성된 모델/핸들러 | 수동 코딩 에러 방지, 명세 일치 보장 |
+
+---
+
+## 15. 운영 가이드
+
+### 15.1 동시성 제한 튜닝
+
+```bash
+alertmanager --web.get-concurrency=20 --web.timeout=30s
+```
+
+| 파라미터 | 기본값 | 권장 |
+|---------|--------|------|
+| `--web.get-concurrency` | 0 (무제한) | CPU 코어 수 * 2 |
+| `--web.timeout` | 0 (무제한) | 30s |
+
+### 15.2 모니터링 권장 쿼리
+
+```promql
+# 동시성 제한 초과 빈도
+rate(alertmanager_http_concurrency_limit_exceeded_total[5m])
+
+# API 응답 시간 p99
+histogram_quantile(0.99, rate(alertmanager_http_request_duration_seconds_bucket[5m]))
+
+# 현재 처리 중인 요청
+alertmanager_http_requests_in_flight
+```
+
+## 16. API v2 엔드포인트 전체 목록
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| GET | `/api/v2/status` | Alertmanager 상태 조회 |
+| GET | `/api/v2/alerts` | 활성 알림 목록 조회 |
+| POST | `/api/v2/alerts` | 새 알림 생성/갱신 |
+| GET | `/api/v2/alerts/groups` | 알림 그룹별 조회 |
+| GET | `/api/v2/silences` | Silence 목록 조회 |
+| POST | `/api/v2/silences` | 새 Silence 생성 |
+| GET | `/api/v2/silence/{silenceID}` | 특정 Silence 조회 |
+| DELETE | `/api/v2/silence/{silenceID}` | Silence 만료 처리 |
+| GET | `/api/v2/receivers` | 수신자 목록 조회 |
+
+모든 엔드포인트는 OpenAPI 2.0 스펙(`api/v2/openapi.yaml`)에 정의되어 있으며, `go-swagger`를 통해 서버 코드가 자동 생성된다. 핸들러 구현은 `api/v2/api.go`의 `API` 구조체에서 각 엔드포인트별 핸들러 함수를 주입받는 방식이다.
+
+```
+api/v2/openapi.yaml → go-swagger codegen → api/v2/restapi/ (자동생성)
+api/v2/api.go → API struct → 핸들러 함수 주입 → 실제 비즈니스 로직 연결
+```

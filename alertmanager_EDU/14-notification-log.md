@@ -307,3 +307,198 @@ AM-2에서 동일 Alert flush:
 │          └→ 경과 → 통과 (반복 전송)          │
 └─────────────────────────────────────────────┘
 ```
+
+## 13. 실제 소스 코드 심화 분석
+
+### 13.1 Log 구조체 전체
+
+```go
+// nflog/nflog.go
+type Log struct {
+    clock      quartz.Clock          // 테스트 가능한 시계
+    logger     *slog.Logger
+    metrics    *metrics
+    retention  time.Duration         // 만료 후 보존 기간
+
+    mtx        sync.RWMutex
+    st         state                 // map[string]*pb.MeshEntry
+    broadcast  func([]byte)          // 클러스터 브로드캐스트
+
+    maintenanceRunning atomic.Int32  // 동시 Maintenance 방지
+}
+```
+
+`quartz.Clock`은 `coder/quartz` 패키지의 테스트 가능한 시계이다. 테스트에서 시간을 제어하여 GC, 만료, RepeatInterval 등의 시간 기반 로직을 결정적으로 테스트할 수 있다.
+
+### 13.2 Store — key-value 저장소 상세
+
+```go
+// nflog/nflog.go
+func NewStore(entry *pb.Entry) *Store {
+    var receiverData map[string]*pb.ReceiverDataValue
+    if entry != nil {
+        receiverData = maps.Clone(entry.ReceiverData)  // 방어적 복사
+    }
+    if receiverData == nil {
+        receiverData = make(map[string]*pb.ReceiverDataValue)
+    }
+    return &Store{data: receiverData}
+}
+```
+
+**왜 `maps.Clone`으로 방어적 복사를 하는가?**
+
+Store는 Pipeline의 여러 Stage에서 공유된다. 한 Stage가 Store를 수정하면 다른 Stage에 영향을 줄 수 있다. 복사본을 만들어 원본 Entry의 데이터를 보호한다.
+
+### 13.3 에러 타입
+
+```go
+// nflog/nflog.go
+var ErrNotFound = errors.New("not found")
+var ErrInvalidState = errors.New("invalid state")
+```
+
+| 에러 | 발생 시점 | 의미 |
+|------|----------|------|
+| `ErrNotFound` | `Query()` 결과 없음 | 해당 키의 발송 기록 없음 |
+| `ErrInvalidState` | `Merge()` 시 | 유효하지 않은 상태 데이터 수신 |
+
+### 13.4 QueryParam 함수형 패턴
+
+```go
+// nflog/nflog.go
+type query struct {
+    recv     *pb.Receiver
+    groupKey string
+}
+
+type QueryParam func(*query) error
+
+func QReceiver(r *pb.Receiver) QueryParam {
+    return func(q *query) error {
+        q.recv = r
+        return nil
+    }
+}
+
+func QGroupKey(gk string) QueryParam {
+    return func(q *query) error {
+        q.groupKey = gk
+        return nil
+    }
+}
+```
+
+**왜 함수형 옵션 패턴을 사용하는가?**
+
+쿼리 파라미터가 추가될 때 기존 API를 변경하지 않고 새 `QueryParam` 함수만 추가하면 된다. 호출자는 필요한 파라미터만 선택적으로 전달한다.
+
+---
+
+## 14. 스냅샷 형식
+
+```
+스냅샷 파일 형식: Protobuf length-delimited 레코드
+    ┌─────────────────────────┐
+    │ varint: 레코드 1 크기    │
+    │ MeshEntry 1 (protobuf)  │
+    ├─────────────────────────┤
+    │ varint: 레코드 2 크기    │
+    │ MeshEntry 2 (protobuf)  │
+    ├─────────────────────────┤
+    │ ...                     │
+    └─────────────────────────┘
+
+    protodelim.MarshalTo()로 직렬화
+    protodelim.UnmarshalFrom()으로 역직렬화
+```
+
+`google.golang.org/protobuf/encoding/protodelim` 패키지를 사용하여 길이 접두사가 붙는 Protobuf 레코드를 연속으로 기록한다. 이 형식은 스트리밍 읽기가 가능하여, 전체 파일을 메모리에 로드하지 않고도 레코드를 하나씩 읽을 수 있다.
+
+---
+
+## 15. Maintenance 안전장치
+
+```go
+// nflog/nflog.go
+func (l *Log) Maintenance(interval time.Duration, snapf string,
+    stopc <-chan struct{}, override MaintenanceFunc) {
+
+    if !l.maintenanceRunning.CompareAndSwap(0, 1) {
+        return  // 이미 실행 중이면 중복 실행 방지
+    }
+    // ...
+}
+```
+
+**왜 `atomic.Int32`로 중복 방지를 하는가?**
+
+설정 리로드 시 Maintenance goroutine이 재시작될 수 있다. CAS(Compare-And-Swap) 연산으로 하나의 Maintenance만 실행되도록 보장한다.
+
+---
+
+## 16. 성능 고려사항
+
+| 항목 | 설계 | 이유 |
+|------|------|------|
+| state는 map | O(1) 조회 | DedupStage에서 매 flush마다 조회 |
+| GC는 주기적 | ticker 기반 | 연속적 GC는 과도한 잠금 유발 |
+| 스냅샷은 별도 goroutine | Maintenance에서 GC 후 수행 | 메인 처리 경로에 영향 최소화 |
+| broadcast는 비동기 | TransmitLimitedQueue | 네트워크 지연이 로컬 처리를 차단하지 않음 |
+| retention 기반 만료 | 시간 기반 TTL | 무한 증가 방지 |
+
+---
+
+## 17. 운영 가이드
+
+### 17.1 스냅샷 파일 위치
+
+```
+{--storage.path}/nflog  (기본: data/nflog)
+```
+
+### 17.2 retention 설정
+
+```bash
+alertmanager --data.retention=120h  # 기본 120시간 (5일)
+```
+
+retention이 너무 짧으면 클러스터 파티션 후 복구 시 중복 알림이 발생할 수 있다. 너무 길면 스냅샷 크기가 증가한다.
+
+### 17.3 모니터링 권장 쿼리
+
+```promql
+# GC 빈도와 소요시간
+rate(alertmanager_nflog_gc_duration_seconds_count[5m])
+
+# 스냅샷 크기 추이
+alertmanager_nflog_snapshot_size_bytes
+
+# 쿼리 에러율
+rate(alertmanager_nflog_query_errors_total[5m])
+  / rate(alertmanager_nflog_queries_total[5m])
+```
+
+## 18. 운영 시 주요 고려사항
+
+### 18.1 Notification Log 크기 관리
+
+Notification Log의 크기는 알림 빈도와 직접적으로 비례한다. 대규모 환경에서는 다음 요소를 고려해야 한다:
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `--data.retention` | 120h | 알림 로그 보존 기간 |
+| GC 주기 | 자동 | retention 기간 초과 엔트리 자동 정리 |
+| 스냅샷 주기 | 자동 | 메모리 → 디스크 직렬화 주기 |
+
+### 18.2 클러스터 환경에서의 동기화
+
+클러스터 모드에서 Notification Log는 Gossip 프로토콜을 통해 피어 간 동기화된다. 각 엔트리는 `nflog/nflogpb.Entry` 프로토콜 버퍼로 직렬화되어 전파되며, 수렴(convergence)까지의 지연시간은 클러스터 크기에 따라 달라진다.
+
+```
+nflog/nflog.go → Log.GC() → retention 기반 만료 엔트리 제거
+nflog/nflog.go → Log.Snapshot() → protobuf 직렬화 → 디스크 저장
+nflog/nflog.go → Log.Merge() → Gossip으로 수신된 원격 엔트리 병합
+```
+
+이 설계는 최종 일관성(eventual consistency) 모델을 따르며, 네트워크 파티션 상황에서도 각 노드가 독립적으로 중복 억제 판단을 수행할 수 있다.

@@ -291,3 +291,180 @@ Alertmanager는 두 가지 코드 생성 메커니즘을 사용한다:
 - `silence/silencepb/*.pb.go` — Silence 메시지
 
 이 생성된 코드는 클러스터 간 상태 동기화에 사용된다.
+
+## 7. 진입점 분석 (cmd/alertmanager/main.go)
+
+### 7.1 main() → run() 구조
+
+```
+main():
+    1. kingpin 플래그 파싱 (CLI 옵션)
+    2. run() 호출
+
+run() 흐름 (약 682줄):
+    1. 설정 파일 초기 로드 (config.LoadFile)
+    2. Cluster Peer 생성 (cluster.Create)
+    3. Alert Provider 생성 (mem.NewAlerts)
+    4. Notification Log 생성 (nflog.New)
+    5. Silences 저장소 생성 (silence.New)
+    6. Cluster에 상태 등록:
+       - peer.AddState("nfl", nflog)
+       - peer.AddState("sil", silences)
+    7. Marker 생성 (types.NewMarker)
+    8. Inhibitor 생성
+    9. Silencer 생성
+    10. Dispatcher 생성
+    11. API 서버 생성
+    12. Coordinator 설정 (구독자 등록)
+    13. oklog/run.Group으로 goroutine 관리:
+        - HTTP 서버
+        - Dispatcher
+        - Inhibitor
+        - nflog Maintenance
+        - Silences Maintenance
+        - Cluster Peer
+```
+
+### 7.2 oklog/run.Group 패턴
+
+```go
+// 각 컴포넌트를 run.Group에 등록
+var g run.Group
+
+g.Add(func() error {
+    return httpServer.ListenAndServe()
+}, func(err error) {
+    httpServer.Shutdown(ctx)
+})
+
+g.Add(func() error {
+    disp.Run()  // Dispatcher 메인 루프
+    return nil
+}, func(err error) {
+    disp.Stop()
+})
+
+// 하나라도 종료되면 모든 컴포넌트 종료
+if err := g.Run(); err != nil {
+    logger.Error("error running alertmanager", "err", err)
+}
+```
+
+**왜 oklog/run.Group인가?**
+
+`run.Group`은 여러 goroutine 중 하나가 종료(에러 또는 정상)되면 나머지 모두를 interrupt 함수로 종료시킨다. HTTP 서버, Dispatcher, Inhibitor 등이 모두 연결되어 있어, 하나의 장애가 전체 시스템을 중단시키고 깔끔하게 재시작할 수 있게 한다.
+
+## 8. CLI 구조 (amtool)
+
+### 8.1 명령어 트리
+
+```
+amtool
+├── alert
+│   ├── query      — Alert 조회
+│   └── add        — Alert 생성 (테스트용)
+├── silence
+│   ├── add        — Silence 생성
+│   ├── expire     — Silence 만료
+│   ├── import     — Silence 일괄 임포트
+│   ├── query      — Silence 조회
+│   └── update     — Silence 업데이트
+├── config
+│   ├── show       — 현재 설정 표시
+│   └── routes     — Route 트리 시각화
+│       ├── show   — 트리 표시
+│       └── test   — Alert이 어느 Route로 매칭되는지 테스트
+├── check-config   — 설정 파일 유효성 검증
+├── cluster
+│   └── show       — 클러스터 상태 표시
+└── template
+    └── render     — 템플릿 렌더링 테스트
+```
+
+### 8.2 amtool 구현 패턴
+
+```
+cli/root.go:
+    kingpin.Application 초기화
+    각 서브커맨드 등록
+    Execute() → 선택된 명령어 실행
+
+cli/alert_query.go:
+    API v2 클라이언트 사용
+    GET /api/v2/alerts 호출
+    format/ 패키지로 출력 (JSON, extended, simple)
+```
+
+## 9. 내부 저장소 계층
+
+```
+┌───────────────────────────────────────────┐
+│              Provider 계층                 │
+│  provider/mem/mem.go                       │
+│  - 구독/브로드캐스트 패턴                    │
+│  - AlertStoreCallback                      │
+│  - GC goroutine 관리                       │
+│                                            │
+│  ┌─────────────────────────────────────┐  │
+│  │          Store 계층                  │  │
+│  │  store/store.go                     │  │
+│  │  - map[Fingerprint]*Alert           │  │
+│  │  - limit.Bucket (용량 제한)          │  │
+│  │  - GC (만료 Alert 삭제)             │  │
+│  │                                     │  │
+│  │  ┌─────────────────────────────┐    │  │
+│  │  │    Limit 계층               │    │  │
+│  │  │  limit/bucket.go           │    │  │
+│  │  │  - 힙 기반 용량 제한        │    │  │
+│  │  │  - alertname별 제한         │    │  │
+│  │  └─────────────────────────────┘    │  │
+│  └─────────────────────────────────────┘  │
+└───────────────────────────────────────────┘
+```
+
+## 10. Feature Control
+
+```go
+// featurecontrol/featurecontrol.go
+type Flagger interface {
+    EnableReceiverNamesInMetrics() bool
+    ClassicMode() bool
+    UTF8StrictMode() bool
+}
+```
+
+Feature flag로 런타임 동작을 제어한다:
+
+| 플래그 | 효과 |
+|--------|------|
+| `--enable-feature=receiver-names-in-metrics` | 메트릭에 receiver 이름 레이블 추가 |
+| `--enable-feature=classic-mode` | Classic Matcher 파서만 사용 |
+| `--enable-feature=utf8-strict-mode` | UTF-8 Matcher 파서만 사용 |
+
+## 11. Tracing 구성
+
+```go
+// tracing/tracing.go
+type Manager struct {
+    shutdownFunc func() error
+}
+
+func (m *Manager) InitTracing(cfg tracing.TracingConfig) error
+func (m *Manager) Shutdown() error
+```
+
+OpenTelemetry OTLP 프로토콜로 분산 추적 데이터를 내보낸다. 설정 파일의 `tracing` 섹션이나 CLI 플래그로 활성화한다.
+
+## 12. 통합 테스트
+
+```
+test/with_api_v2/
+├── acceptance/
+│   ├── send_test.go          — Alert 전송 E2E
+│   ├── silence_test.go       — Silence CRUD E2E
+│   ├── inhibit_test.go       — Inhibition E2E
+│   ├── cluster_test.go       — HA 클러스터 E2E
+│   └── ...
+```
+
+통합 테스트는 실제 Alertmanager 바이너리를 시작하고, HTTP API를 통해 Alert 전송, Silence 생성, 클러스터 동기화 등을 검증한다. `Procfile`을 사용하여 goreman으로 멀티 인스턴스 HA 환경을 구성할 수 있다.

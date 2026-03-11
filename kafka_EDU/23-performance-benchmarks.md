@@ -488,4 +488,21 @@ kafka-producer-perf-test.sh \
 
 ---
 
+## 18. 실전 벤치마크 체크리스트
+
+| 단계 | 항목 | 확인 사항 |
+|------|------|----------|
+| 준비 | 토픽 생성 | 파티션 수, 복제 팩터 설정 확인 |
+| 준비 | 브로커 설정 | `num.io.threads`, `num.network.threads` 기본값 확인 |
+| 워밍업 | JVM 안정화 | JIT 컴파일 완료까지 최소 1분 워밍업 |
+| 워밍업 | OS 캐시 | 페이지 캐시 상태 확인 (`free -m`) |
+| 실행 | Producer | `acks`, `batch.size`, `linger.ms` 조합별 측정 |
+| 실행 | Consumer | `fetch.min.bytes`, `max.poll.records` 조합별 측정 |
+| 실행 | E2E | Producer→Consumer 전체 경로 지연시간 |
+| 분석 | 지연시간 분포 | p50, p95, p99, p99.9 백분위 확인 |
+| 분석 | 처리량 추이 | 시간에 따른 처리량 변화 그래프 |
+| 분석 | 리소스 사용 | CPU, 메모리, 디스크 I/O, 네트워크 대역폭 |
+
+---
+
 *소스 참조: tools/src/main/java/org/apache/kafka/tools/ProducerPerformance.java, ConsumerPerformance.java, EndToEndLatency.java*
