@@ -559,4 +559,3 @@ func TestSearch_StarredResults(t *testing.T) {
 
 ---
 
-*검증 도구: Claude Code (Opus 4.6)*

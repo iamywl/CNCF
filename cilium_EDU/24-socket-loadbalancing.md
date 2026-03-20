@@ -650,4 +650,3 @@ bpftool map dump name cilium_lb4_services
 ---
 
 *검증 기준: Cilium 소스코드 `pkg/socketlb/` 디렉토리 직접 분석*
-*문서 작성: Claude Code (Opus 4.6)*

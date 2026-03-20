@@ -579,4 +579,3 @@ AccessToken은 URL에 포함되므로:
 
 ---
 
-*검증 도구: Claude Code (Opus 4.6)*

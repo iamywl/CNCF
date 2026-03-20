@@ -1,7 +1,6 @@
 # Helm EDU 커버리지 분석 리포트
 
 > 검증일: 2026-03-08
-> 검증 도구: Claude Code (Opus 4.6)
 > 검증 유형: Group C (경량 검증)
 
 ---
@@ -189,5 +188,4 @@ Sympath, Feature Gates, Version, CopyStructure, Logging)를 3개 문서 +
 
 ---
 
-*검증 도구: Claude Code (Opus 4.6)*
 *최종 갱신: 2026-03-08*

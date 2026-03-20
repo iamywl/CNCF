@@ -1,7 +1,6 @@
 # Cilium EDU 커버리지 분석 리포트
 
 > 검증일: 2026-03-08
-> 검증 도구: Claude Code (Opus 4.6)
 > 소스 기준: /Users/ywlee/sideproejct/CNCF/cilium/
 
 ---
@@ -200,4 +199,3 @@ P2 커버: 10/10 (100%)
 
 ---
 
-*검증 도구: Claude Code (Opus 4.6)*

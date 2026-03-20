@@ -660,4 +660,3 @@ func (m *MockService) CreateDashboardSnapshot(ctx context.Context,
 
 ---
 
-*검증 도구: Claude Code (Opus 4.6)*

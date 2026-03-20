@@ -1,7 +1,6 @@
 # Kubernetes EDU 커버리지 분석 리포트
 
 > 검증일: 2026-03-08
-> 검증 도구: Claude Code (Opus 4.6)
 > 소스코드: `/kubernetes/` (cmd/, pkg/, staging/src/k8s.io/)
 
 ---
@@ -245,4 +244,3 @@ EDU 커버: ~103개 (100%)
 
 *검증 완료: 2026-03-08*
 *보강 완료: 2026-03-08*
-*검증자: Claude Code (Opus 4.6)*
